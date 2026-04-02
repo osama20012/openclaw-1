@@ -28,6 +28,8 @@ export const MESSAGE_ACTION_TARGET_MODE: Record<ChannelMessageActionName, Messag
     leaveGroup: "to",
     sendAttachment: "to",
     delete: "to",
+    forward: "to",
+    copy: "to",
     pin: "to",
     unpin: "to",
     "list-pins": "to",

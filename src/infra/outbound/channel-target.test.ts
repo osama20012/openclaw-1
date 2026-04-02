@@ -19,6 +19,22 @@ describe("applyTargetToParams", () => {
       field: "channelId",
       expected: "C123",
     },
+    {
+      params: {
+        action: "forward",
+        args: { target: "  telegram-user:group:-1003810766364  " } as Record<string, unknown>,
+      },
+      field: "to",
+      expected: "telegram-user:group:-1003810766364",
+    },
+    {
+      params: {
+        action: "copy",
+        args: { target: "  @carol  " } as Record<string, unknown>,
+      },
+      field: "to",
+      expected: "@carol",
+    },
   ])("maps trimmed target into configured field for %j", ({ params, field, expected }) => {
     applyTargetToParams(params);
     expect(params.args[field]).toBe(expected);
