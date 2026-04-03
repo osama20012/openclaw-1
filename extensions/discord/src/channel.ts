@@ -73,6 +73,7 @@ import { parseDiscordTarget } from "./targets.js";
 type DiscordSendFn = typeof sendMessageDiscord;
 type DiscordUiModule = typeof import("./ui.js");
 type DiscordCarbonModule = typeof import("@buape/carbon");
+type DiscordChannelActionsModule = typeof import("./channel-actions.js");
 type DiscordTextDisplay = InstanceType<DiscordCarbonModule["TextDisplay"]>;
 type DiscordSeparator = InstanceType<DiscordCarbonModule["Separator"]>;
 
@@ -83,7 +84,7 @@ let discordProbeRuntimePromise: Promise<typeof import("./probe.runtime.js")> | u
 let discordAuditModulePromise: Promise<typeof import("./audit.js")> | undefined;
 let discordUiModuleCache: DiscordUiModule | null = null;
 let discordCarbonModuleCache: DiscordCarbonModule | null = null;
-let discordChannelActionsModuleCache: typeof import("./channel-actions.js") | null = null;
+let discordChannelActionsModuleCache: DiscordChannelActionsModule | null = null;
 
 const require = createRequire(import.meta.url);
 
@@ -107,15 +108,15 @@ function loadDiscordCarbonModule() {
   return discordCarbonModuleCache;
 }
 
-function loadDiscordChannelActionsModule() {
-  discordChannelActionsModuleCache ??=
-    require("./channel-actions.js") as typeof import("./channel-actions.js");
-  return discordChannelActionsModuleCache;
-}
-
 function loadDiscordUiModule() {
   discordUiModuleCache ??= require("./ui.js") as DiscordUiModule;
   return discordUiModuleCache;
+}
+
+function loadDiscordChannelActionsModule() {
+  discordChannelActionsModuleCache ??=
+    require("./channel-actions.js") as DiscordChannelActionsModule;
+  return discordChannelActionsModuleCache;
 }
 
 const meta = getChatChannelMeta("discord");
@@ -166,11 +167,11 @@ const discordMessageActions = {
     if (runtimeHandleAction) {
       return await runtimeHandleAction(ctx);
     }
-    const discordMessageActionsImpl = loadDiscordChannelActionsModule().discordMessageActions;
-    if (!discordMessageActionsImpl.handleAction) {
+    const { discordMessageActions } = loadDiscordChannelActionsModule();
+    if (!discordMessageActions.handleAction) {
       throw new Error("Discord message actions not available");
     }
-    return await discordMessageActionsImpl.handleAction(ctx);
+    return await discordMessageActions.handleAction(ctx);
   },
 };
 
