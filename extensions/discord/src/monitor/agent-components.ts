@@ -28,7 +28,6 @@ import type { DiscordAccountConfig } from "openclaw/plugin-sdk/config-runtime";
 import { isDangerousNameMatchingEnabled } from "openclaw/plugin-sdk/dangerous-name-runtime";
 import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { getAgentScopedMediaLocalRoots } from "openclaw/plugin-sdk/media-runtime";
-import type { PluginInteractiveDiscordHandlerContext } from "openclaw/plugin-sdk/plugin-runtime";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { createNonExitingRuntime, type RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { resolveOpenProviderRuntimeGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
@@ -40,6 +39,8 @@ import {
 } from "../component-custom-id.js";
 import { resolveDiscordComponentEntry, resolveDiscordModalEntry } from "../components-registry.js";
 import type { DiscordComponentEntry, DiscordModalEntry } from "../components.js";
+import { type DiscordInteractiveHandlerContext } from "../interactive-dispatch.js";
+import { dispatchDiscordPluginInteractiveHandler } from "../interactive-dispatch.js";
 import { editDiscordComponentMessage } from "../send.components.js";
 import {
   AGENT_BUTTON_KEY,
@@ -91,6 +92,7 @@ import { deliverDiscordReply } from "./reply-delivery.js";
 
 let conversationRuntimePromise: Promise<typeof import("./agent-components.runtime.js")> | undefined;
 let componentsRuntimePromise: Promise<typeof import("../components.js")> | undefined;
+let replyRuntimePromise: Promise<typeof import("openclaw/plugin-sdk/reply-runtime")> | undefined;
 let replyPipelineRuntimePromise:
   | Promise<typeof import("openclaw/plugin-sdk/channel-reply-pipeline")>
   | undefined;
@@ -106,6 +108,10 @@ async function loadComponentsRuntime() {
   return await componentsRuntimePromise;
 }
 
+async function loadReplyRuntime() {
+  replyRuntimePromise ??= import("openclaw/plugin-sdk/reply-runtime");
+  return await replyRuntimePromise;
+}
 async function loadReplyPipelineRuntime() {
   replyPipelineRuntimePromise ??= import("openclaw/plugin-sdk/channel-reply-pipeline");
   return await replyPipelineRuntimePromise;
@@ -191,7 +197,7 @@ async function dispatchPluginDiscordInteractiveEvent(params: {
     }
     await params.interaction.update(payload);
   };
-  const respond: PluginInteractiveDiscordHandlerContext["respond"] = {
+  const respond: DiscordInteractiveHandlerContext["respond"] = {
     acknowledge: async () => {
       if (responded) {
         return;
@@ -215,7 +221,7 @@ async function dispatchPluginDiscordInteractiveEvent(params: {
       });
     },
     editMessage: async (
-      input: Parameters<PluginInteractiveDiscordHandlerContext["respond"]["editMessage"]>[0],
+      input: Parameters<DiscordInteractiveHandlerContext["respond"]["editMessage"]>[0],
     ) => {
       const { text, components } = input;
       responded = true;
@@ -279,9 +285,7 @@ async function dispatchPluginDiscordInteractiveEvent(params: {
     }
     return "handled";
   }
-  const { dispatchPluginInteractiveHandler } = await loadConversationRuntime();
-  const dispatched = await dispatchPluginInteractiveHandler({
-    channel: "discord",
+  const dispatched = await dispatchDiscordPluginInteractiveHandler({
     data: params.data,
     interactionId: resolveDiscordInteractionId(params.interaction),
     ctx: {

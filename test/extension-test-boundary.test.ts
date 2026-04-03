@@ -13,6 +13,7 @@ const allowedNonExtensionTests = new Set<string>([
   "src/agents/pi-embedded-runner-extraparams.test.ts",
   "src/channels/plugins/contracts/dm-policy.contract.test.ts",
   "src/channels/plugins/contracts/group-policy.contract.test.ts",
+  "src/plugins/interactive.test.ts",
   "src/plugins/contracts/discovery.contract.test.ts",
 ]);
 
@@ -157,7 +158,6 @@ describe("non-extension test boundaries", () => {
       "src/auto-reply/reply.triggers.trigger-handling.test-harness.ts",
       "src/channels/plugins/contracts/slack-outbound-harness.ts",
       "src/commands/channel-test-registry.ts",
-      "src/gateway/test-helpers.mocks.ts",
       "src/plugin-sdk/testing.ts",
     ]);
     const files = walkCode(path.join(repoRoot, "src"));
