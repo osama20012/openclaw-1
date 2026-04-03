@@ -283,6 +283,21 @@ describe("buildEmbeddedRunPayloads", () => {
     });
   });
 
+  it("suppresses assistant error payloads when visible error replies are disabled", () => {
+    expectNoPayloads({
+      assistantTexts: [errorJson],
+      lastAssistant: makeAssistant({}),
+      suppressVisibleErrorReplies: true,
+    });
+  });
+
+  it("suppresses tool warning payloads when visible error replies are disabled", () => {
+    expectNoPayloads({
+      lastToolError: { toolName: "browser", error: "connection timeout" },
+      suppressVisibleErrorReplies: true,
+    });
+  });
+
   it.each([
     {
       name: "still shows mutating tool errors when messages.suppressToolErrors is enabled",

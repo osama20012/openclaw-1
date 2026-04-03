@@ -56,6 +56,7 @@ import {
   parseImageSizeError,
   pickFallbackThinkingLevel,
 } from "../pi-embedded-helpers.js";
+import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import { ensureRuntimePluginsLoaded } from "../runtime-plugins.js";
 import { derivePromptTokens, normalizeUsage, type UsageLike } from "../usage.js";
 import { redactRunIdentifier, resolveRunWorkspaceDir } from "../workspace-run.js";
@@ -1279,6 +1280,7 @@ export async function runEmbeddedPiAgent(
             reasoningLevel: params.reasoningLevel,
             toolResultFormat: resolvedToolResultFormat,
             suppressToolErrorWarnings: params.suppressToolErrorWarnings,
+            suppressVisibleErrorReplies: params.suppressVisibleErrorReplies,
             inlineToolResultsAllowed: false,
             didSendViaMessagingTool: attempt.didSendViaMessagingTool,
             didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
@@ -1290,12 +1292,14 @@ export async function runEmbeddedPiAgent(
           if (timedOut && !timedOutDuringCompaction && payloads.length === 0) {
             return {
               payloads: [
-                {
-                  text:
-                    "Request timed out before a response was generated. " +
-                    "Please try again, or increase `agents.defaults.timeoutSeconds` in your config.",
-                  isError: true,
-                },
+                params.suppressVisibleErrorReplies
+                  ? { text: SILENT_REPLY_TOKEN }
+                  : {
+                      text:
+                        "Request timed out before a response was generated. " +
+                        "Please try again, or increase `agents.defaults.timeoutSeconds` in your config.",
+                      isError: true,
+                    },
               ],
               meta: {
                 durationMs: Date.now() - started,

@@ -93,6 +93,8 @@ export type RunEmbeddedPiAgentParams = {
   toolResultFormat?: ToolResultFormat;
   /** If true, suppress tool error warning payloads for this run (including mutating tools). */
   suppressToolErrorWarnings?: boolean;
+  /** If true, suppress all user-visible error/failure replies for this run. */
+  suppressVisibleErrorReplies?: boolean;
   /** Bootstrap context mode for workspace file injection. */
   bootstrapContextMode?: "full" | "lightweight";
   /** Run kind hint for context mode behavior. */

@@ -115,6 +115,7 @@ export function buildEmbeddedRunPayloads(params: {
   reasoningLevel?: ReasoningLevel;
   toolResultFormat?: ToolResultFormat;
   suppressToolErrorWarnings?: boolean;
+  suppressVisibleErrorReplies?: boolean;
   inlineToolResultsAllowed: boolean;
   didSendViaMessagingTool?: boolean;
   didSendDeterministicApprovalPrompt?: boolean;
@@ -141,13 +142,16 @@ export function buildEmbeddedRunPayloads(params: {
   }> = [];
 
   const useMarkdown = params.toolResultFormat === "markdown";
+  const suppressVisibleErrors = params.suppressVisibleErrorReplies === true;
   const suppressAssistantArtifacts = params.didSendDeterministicApprovalPrompt === true;
   const lastAssistantErrored = params.lastAssistant?.stopReason === "error";
   const errorText =
     params.lastAssistant && lastAssistantErrored
       ? suppressAssistantArtifacts
         ? undefined
-        : formatAssistantErrorText(params.lastAssistant, {
+        : suppressVisibleErrors
+          ? undefined
+          : formatAssistantErrorText(params.lastAssistant, {
             cfg: params.config,
             sessionKey: params.sessionKey,
             provider: params.provider,
@@ -310,7 +314,7 @@ export function buildEmbeddedRunPayloads(params: {
 
     // Always surface mutating tool failures so we do not silently confirm actions that did not happen.
     // Otherwise, keep the previous behavior and only surface non-recoverable failures when no reply exists.
-    if (warningPolicy.showWarning) {
+    if (!suppressVisibleErrors && warningPolicy.showWarning) {
       const toolSummary = formatToolAggregate(
         params.lastToolError.toolName,
         params.lastToolError.meta ? [params.lastToolError.meta] : undefined,

@@ -439,6 +439,7 @@ export async function runAgentTurnWithFallback(params: {
                   return isMarkdownCapableMessageChannel(channel) ? "markdown" : "plain";
                 })(),
                 suppressToolErrorWarnings: params.opts?.suppressToolErrorWarnings,
+                suppressVisibleErrorReplies: params.opts?.suppressVisibleErrorReplies,
                 bootstrapContextMode: params.opts?.bootstrapContextMode,
                 bootstrapContextRunKind: params.opts?.isHeartbeat ? "heartbeat" : "default",
                 images: params.opts?.images,
@@ -622,6 +623,12 @@ export async function runAgentTurnWithFallback(params: {
         (await params.resetSessionAfterCompactionFailure(embeddedError.message))
       ) {
         didResetAfterCompactionFailure = true;
+        if (params.opts?.suppressVisibleErrorReplies) {
+          return {
+            kind: "final",
+            payload: { text: SILENT_REPLY_TOKEN },
+          };
+        }
         return {
           kind: "final",
           payload: {
@@ -632,6 +639,12 @@ export async function runAgentTurnWithFallback(params: {
       if (embeddedError?.kind === "role_ordering") {
         const didReset = await params.resetSessionAfterRoleOrderingConflict(embeddedError.message);
         if (didReset) {
+          if (params.opts?.suppressVisibleErrorReplies) {
+            return {
+              kind: "final",
+              payload: { text: SILENT_REPLY_TOKEN },
+            };
+          }
           return {
             kind: "final",
             payload: {
@@ -661,6 +674,12 @@ export async function runAgentTurnWithFallback(params: {
               "Logs: openclaw logs --follow"
             : "⚠️ Agent failed before reply: model switch could not be completed. " +
               "The requested model may be temporarily unavailable. Please try again shortly.";
+          if (params.opts?.suppressVisibleErrorReplies) {
+            return {
+              kind: "final",
+              payload: { text: SILENT_REPLY_TOKEN },
+            };
+          }
           return {
             kind: "final",
             payload: {
@@ -692,6 +711,12 @@ export async function runAgentTurnWithFallback(params: {
         (await params.resetSessionAfterCompactionFailure(message))
       ) {
         didResetAfterCompactionFailure = true;
+        if (params.opts?.suppressVisibleErrorReplies) {
+          return {
+            kind: "final",
+            payload: { text: SILENT_REPLY_TOKEN },
+          };
+        }
         return {
           kind: "final",
           payload: {
@@ -702,6 +727,12 @@ export async function runAgentTurnWithFallback(params: {
       if (isRoleOrderingError) {
         const didReset = await params.resetSessionAfterRoleOrderingConflict(message);
         if (didReset) {
+          if (params.opts?.suppressVisibleErrorReplies) {
+            return {
+              kind: "final",
+              payload: { text: SILENT_REPLY_TOKEN },
+            };
+          }
           return {
             kind: "final",
             payload: {
@@ -746,6 +777,13 @@ export async function runAgentTurnWithFallback(params: {
           defaultRuntime.error(
             `Failed to reset corrupted session ${params.sessionKey}: ${String(cleanupErr)}`,
           );
+        }
+
+        if (params.opts?.suppressVisibleErrorReplies) {
+          return {
+            kind: "final",
+            payload: { text: SILENT_REPLY_TOKEN },
+          };
         }
 
         return {
@@ -795,6 +833,13 @@ export async function runAgentTurnWithFallback(params: {
                 ? `⚠️ Agent failed before reply: ${trimmedMessage}.\nLogs: openclaw logs --follow`
                 : buildExternalRunFailureText(message);
 
+      if (params.opts?.suppressVisibleErrorReplies) {
+        return {
+          kind: "final",
+          payload: { text: SILENT_REPLY_TOKEN },
+        };
+      }
+
       return {
         kind: "final",
         payload: {
@@ -814,6 +859,12 @@ export async function runAgentTurnWithFallback(params: {
   if (finalEmbeddedError && !hasPayloadText) {
     const errorMsg = finalEmbeddedError.message ?? "";
     if (isContextOverflowError(errorMsg)) {
+      if (params.opts?.suppressVisibleErrorReplies) {
+        return {
+          kind: "final",
+          payload: { text: SILENT_REPLY_TOKEN },
+        };
+      }
       return {
         kind: "final",
         payload: {
@@ -851,8 +902,11 @@ export async function runAgentTurnWithFallback(params: {
         errorCandidate &&
         (isRateLimitErrorMessage(errorCandidate) || isOverloadedErrorMessage(errorCandidate))
       ) {
-        const isOverloaded = isOverloadedErrorMessage(errorCandidate);
-        runResult.payloads = [
+        if (params.opts?.suppressVisibleErrorReplies) {
+          runResult.payloads = [{ text: SILENT_REPLY_TOKEN }];
+        } else {
+          const isOverloaded = isOverloadedErrorMessage(errorCandidate);
+          runResult.payloads = [
           {
             text: isOverloaded
               ? "⚠️ The AI service is temporarily overloaded. Please try again in a moment."
@@ -860,8 +914,9 @@ export async function runAgentTurnWithFallback(params: {
             isError: true,
           },
         ];
-      }
+        }
     }
+  }
   }
 
   return {
