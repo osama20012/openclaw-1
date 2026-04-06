@@ -89,10 +89,28 @@ function createSpawnOptions(cmd, args, envOverride) {
   };
 }
 
+function quoteWindowsCmdArg(arg) {
+  if (arg.length === 0) {
+    return '""';
+  }
+  if (!/[\s"]/u.test(arg)) {
+    return arg;
+  }
+  return `"${arg.replace(/"/g, '""')}"`;
+}
+
 function run(cmd, args) {
   let child;
   try {
-    child = spawn(cmd, args, createSpawnOptions(cmd, args));
+    const spawnOptions = createSpawnOptions(cmd, args);
+    const useShell = Boolean(spawnOptions.shell && process.platform === "win32");
+    child = useShell
+      ? spawn(
+          quoteWindowsCmdArg(cmd),
+          args.map((arg) => quoteWindowsCmdArg(arg)),
+          spawnOptions,
+        )
+      : spawn(cmd, args, spawnOptions);
   } catch (err) {
     console.error(`Failed to launch ${cmd}:`, err);
     process.exit(1);
@@ -113,7 +131,15 @@ function run(cmd, args) {
 function runSync(cmd, args, envOverride) {
   let result;
   try {
-    result = spawnSync(cmd, args, createSpawnOptions(cmd, args, envOverride));
+    const spawnOptions = createSpawnOptions(cmd, args, envOverride);
+    const useShell = Boolean(spawnOptions.shell && process.platform === "win32");
+    result = useShell
+      ? spawnSync(
+          quoteWindowsCmdArg(cmd),
+          args.map((arg) => quoteWindowsCmdArg(arg)),
+          spawnOptions,
+        )
+      : spawnSync(cmd, args, spawnOptions);
   } catch (err) {
     console.error(`Failed to launch ${cmd}:`, err);
     process.exit(1);
