@@ -10,13 +10,74 @@ import {
 } from "../../test-utils/channel-plugins.js";
 import type { TemplateContext } from "../templating.js";
 import { buildThreadingToolContext } from "./agent-runner-utils.js";
+import { resolveFollowupDeliveryPayloads } from "./followup-delivery.js";
 import { applyReplyThreading } from "./reply-payloads.js";
+import {
+  clearFollowupDrainCallback,
+  getFollowupQueueCountersForTest,
+  resetFollowupQueueCountersForTest,
+  scheduleFollowupDrain,
+} from "./queue/drain.js";
+import { clearFollowupQueue, getFollowupQueue } from "./queue/state.js";
+import type { FollowupRun } from "./queue/types.js";
+import {
+  ReplyRunAlreadyActiveError,
+  replyRunRegistry,
+} from "./reply-run-registry.js";
 import {
   formatRunLabel,
   formatRunStatus,
   resolveSubagentLabel,
   sortSubagentRuns,
 } from "./subagents-utils.js";
+
+const COLLECT_QUEUE_KEY = "agent:main:collect:anchor:test";
+
+function makeCollectFollowupRun(params: {
+  prompt: string;
+  anchorMessageId: string;
+  senderId?: string;
+}): FollowupRun {
+  return {
+    prompt: params.prompt,
+    messageId: params.anchorMessageId,
+    anchorMessageId: params.anchorMessageId,
+    summaryLine: params.prompt,
+    enqueuedAt: Date.now(),
+    originatingChannel: "telegram",
+    originatingTo: "123",
+    run: {
+      agentId: "main",
+      agentDir: "/tmp/agent",
+      sessionId: "session-1",
+      sessionKey: COLLECT_QUEUE_KEY,
+      messageProvider: "telegram",
+      senderId: params.senderId ?? "user-1",
+      sessionFile: "/tmp/session-1.jsonl",
+      workspaceDir: "/tmp/workspace",
+      config: {} as FollowupRun["run"]["config"],
+      provider: "openai",
+      model: "gpt-5.4",
+      timeoutMs: 30_000,
+      blockReplyBreak: "message_end",
+    },
+  };
+}
+
+async function waitForDeliveredRun<T>(
+  predicate: () => T | undefined,
+  timeoutMs = 2_000,
+): Promise<T> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = predicate();
+    if (value !== undefined) {
+      return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for collected followup run");
+}
 
 function createSlackThreadingPlugin(): ChannelPlugin {
   return {
@@ -37,6 +98,8 @@ describe("buildThreadingToolContext", () => {
 
   afterEach(() => {
     resetPluginRuntimeStateForTest();
+    clearFollowupQueue(COLLECT_QUEUE_KEY);
+    clearFollowupDrainCallback(COLLECT_QUEUE_KEY);
   });
 
   it("uses the recipient id for WhatsApp without origin routing metadata", () => {
@@ -367,6 +430,116 @@ describe("applyReplyThreading auto-threading", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].replyToId).toBe("mm-post-abc123");
+  });
+});
+
+describe("resolveFollowupDeliveryPayloads anchor threading", () => {
+  it("keeps a stable anchor for independent followup payloads when replyToMode is all", () => {
+    expect(
+      resolveFollowupDeliveryPayloads({
+        cfg: {
+          channels: {
+            telegram: {
+              replyToMode: "all",
+            },
+          },
+        } as OpenClawConfig,
+        payloads: [{ text: "first" }, { text: "second" }],
+        originatingChannel: "telegram",
+        anchorMessageId: "42",
+      }),
+    ).toEqual([
+      { text: "first", replyToId: "42" },
+      { text: "second", replyToId: "42" },
+    ]);
+  });
+
+  it("preserves explicit payload reply ids over the anchor", () => {
+    expect(
+      resolveFollowupDeliveryPayloads({
+        cfg: {
+          channels: {
+            telegram: {
+              replyToMode: "all",
+            },
+          },
+        } as OpenClawConfig,
+        payloads: [{ text: "first", replyToId: "99" }, { text: "second" }],
+        originatingChannel: "telegram",
+        anchorMessageId: "42",
+      }),
+    ).toEqual([
+      { text: "first", replyToId: "99" },
+      { text: "second", replyToId: "42" },
+    ]);
+  });
+});
+
+describe("collect queue anchoring", () => {
+  afterEach(() => {
+    clearFollowupQueue(COLLECT_QUEUE_KEY);
+    clearFollowupDrainCallback(COLLECT_QUEUE_KEY);
+    resetFollowupQueueCountersForTest();
+  });
+
+  it("uses the first queued message as the stable anchor for collected runs", async () => {
+    const queue = getFollowupQueue(COLLECT_QUEUE_KEY, {
+      mode: "collect",
+      debounceMs: 0,
+    });
+    const first = makeCollectFollowupRun({ prompt: "first prompt", anchorMessageId: "111" });
+    const second = makeCollectFollowupRun({ prompt: "second prompt", anchorMessageId: "222" });
+    queue.items.push(first, second);
+    queue.lastRun = second.run;
+
+    const delivered: FollowupRun[] = [];
+    scheduleFollowupDrain(COLLECT_QUEUE_KEY, async (run) => {
+      delivered.push(run);
+    });
+
+    const collected = await waitForDeliveredRun(() => delivered[0]);
+    expect(collected.anchorMessageId).toBe("111");
+    expect(collected.prompt).toContain("Queued #1");
+    expect(collected.prompt).toContain("Queued #2");
+  });
+
+  it("waits for active runs instead of hot-looping followup drains", async () => {
+    const queue = getFollowupQueue(COLLECT_QUEUE_KEY, {
+      mode: "followup",
+      debounceMs: 0,
+    });
+    const run = makeCollectFollowupRun({ prompt: "queued prompt", anchorMessageId: "111" });
+    queue.items.push(run);
+    queue.lastRun = run.run;
+
+    const active = replyRunRegistry.begin({
+      sessionKey: COLLECT_QUEUE_KEY,
+      sessionId: "active-session",
+      resetTriggered: false,
+    });
+    const delivered: FollowupRun[] = [];
+    let attempts = 0;
+
+    scheduleFollowupDrain(COLLECT_QUEUE_KEY, async (queued) => {
+      attempts++;
+      if (attempts === 1) {
+        throw new ReplyRunAlreadyActiveError(COLLECT_QUEUE_KEY);
+      }
+      delivered.push(queued);
+    });
+
+    await waitForDeliveredRun(
+      () =>
+        getFollowupQueueCountersForTest().followup_wait_active_run_total === 1
+          ? true
+          : undefined,
+    );
+    expect(attempts).toBe(1);
+    active.complete();
+
+    const retried = await waitForDeliveredRun(() => delivered[0]);
+    expect(retried.anchorMessageId).toBe("111");
+    expect(attempts).toBe(2);
   });
 });
 

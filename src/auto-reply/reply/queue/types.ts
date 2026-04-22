@@ -26,6 +26,8 @@ export type FollowupRun = {
   transcriptPrompt?: string;
   /** Provider message ID, when available (for deduplication). */
   messageId?: string;
+  /** Stable reply anchor for all payloads emitted from this run. */
+  anchorMessageId?: string;
   summaryLine?: string;
   enqueuedAt: number;
   images?: Array<{ type: "image"; data: string; mimeType: string }>;

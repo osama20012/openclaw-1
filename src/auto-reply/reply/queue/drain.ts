@@ -10,6 +10,10 @@ import {
   previewQueueSummaryPrompt,
   waitForQueueDebounce,
 } from "../../../utils/queue-helpers.js";
+import {
+  ReplyRunAlreadyActiveError,
+  replyRunRegistry,
+} from "../reply-run-registry.js";
 import { isRoutableChannel } from "../route-reply.js";
 import { FOLLOWUP_QUEUES } from "./state.js";
 import type { FollowupRun } from "./types.js";
@@ -21,6 +25,39 @@ const FOLLOWUP_DRAIN_CALLBACKS_KEY = Symbol.for("openclaw.followupDrainCallbacks
 const FOLLOWUP_RUN_CALLBACKS = resolveGlobalMap<string, (run: FollowupRun) => Promise<void>>(
   FOLLOWUP_DRAIN_CALLBACKS_KEY,
 );
+
+const FOLLOWUP_ACTIVE_RUN_WAIT_ATTEMPTS_KEY = Symbol.for("openclaw.followupActiveRunWaitAttempts");
+const FOLLOWUP_QUEUE_COUNTERS_KEY = Symbol.for("openclaw.followupQueueCounters");
+const FOLLOWUP_ACTIVE_RUN_WAIT_ATTEMPTS = resolveGlobalMap<string, number>(
+  FOLLOWUP_ACTIVE_RUN_WAIT_ATTEMPTS_KEY,
+);
+
+export type FollowupQueueCounterName = "followup_wait_active_run_total";
+
+const FOLLOWUP_QUEUE_COUNTERS = resolveGlobalMap<FollowupQueueCounterName, number>(
+  FOLLOWUP_QUEUE_COUNTERS_KEY,
+);
+
+function incrementFollowupQueueCounter(name: FollowupQueueCounterName): void {
+  FOLLOWUP_QUEUE_COUNTERS.set(name, (FOLLOWUP_QUEUE_COUNTERS.get(name) ?? 0) + 1);
+}
+
+export function getFollowupQueueCountersForTest(): Record<FollowupQueueCounterName, number> {
+  return {
+    followup_wait_active_run_total:
+      FOLLOWUP_QUEUE_COUNTERS.get("followup_wait_active_run_total") ?? 0,
+  };
+}
+
+export function resetFollowupQueueCountersForTest(): void {
+  FOLLOWUP_QUEUE_COUNTERS.clear();
+  FOLLOWUP_ACTIVE_RUN_WAIT_ATTEMPTS.clear();
+}
+
+export function resolveFollowupActiveRunBackoffMs(attempt: number): number {
+  const boundedAttempt = Math.max(1, Math.trunc(attempt));
+  return Math.min(60_000, 5_000 * 2 ** (boundedAttempt - 1));
+}
 
 export function rememberFollowupDrainCallback(
   key: string,
@@ -46,6 +83,10 @@ type OriginRoutingMetadata = Pick<
   FollowupRun,
   "originatingChannel" | "originatingTo" | "originatingAccountId" | "originatingThreadId"
 >;
+
+function resolveCollectAnchorMessageId(items: FollowupRun[]): string | undefined {
+  return items.find((item) => item.anchorMessageId?.trim())?.anchorMessageId;
+}
 
 function resolveOriginRoutingMetadata(items: FollowupRun[]): OriginRoutingMetadata {
   return {
@@ -154,6 +195,7 @@ export function scheduleFollowupDrain(
   // callbacks around from finalize calls where no queue work is pending.
   rememberFollowupDrainCallback(key, effectiveRunFollowup);
   void (async () => {
+    let activeRunRetryDelayMs: number | undefined;
     try {
       const collectState = { forceIndividualCollect: false };
       while (queue.items.length > 0 || queue.droppedCount > 0) {
@@ -179,6 +221,7 @@ export function scheduleFollowupDrain(
             if (summaryOnlyPrompt && run) {
               await effectiveRunFollowup({
                 prompt: summaryOnlyPrompt,
+                anchorMessageId: resolveCollectAnchorMessageId(queue.items),
                 run,
                 enqueuedAt: Date.now(),
                 ...collectQueuedImages(queue.items),
@@ -202,6 +245,7 @@ export function scheduleFollowupDrain(
             }
             await effectiveRunFollowup({
               prompt: summary,
+              anchorMessageId: resolveCollectAnchorMessageId(queue.items),
               run,
               enqueuedAt: Date.now(),
             });
@@ -225,6 +269,7 @@ export function scheduleFollowupDrain(
             });
             await effectiveRunFollowup({
               prompt,
+              anchorMessageId: resolveCollectAnchorMessageId(groupItems),
               run,
               enqueuedAt: Date.now(),
               ...routing,
@@ -249,6 +294,7 @@ export function scheduleFollowupDrain(
             !(await drainNextQueueItem(queue.items, async (item) => {
               await effectiveRunFollowup({
                 prompt: summaryPrompt,
+                anchorMessageId: item.anchorMessageId,
                 run,
                 enqueuedAt: Date.now(),
                 originatingChannel: item.originatingChannel,
@@ -269,14 +315,31 @@ export function scheduleFollowupDrain(
           break;
         }
       }
+      FOLLOWUP_ACTIVE_RUN_WAIT_ATTEMPTS.delete(key);
     } catch (err) {
-      queue.lastEnqueuedAt = Date.now();
-      defaultRuntime.error?.(`followup queue drain failed for ${key}: ${String(err)}`);
+      if (err instanceof ReplyRunAlreadyActiveError) {
+        queue.lastEnqueuedAt = Date.now();
+        incrementFollowupQueueCounter("followup_wait_active_run_total");
+        const attempt = (FOLLOWUP_ACTIVE_RUN_WAIT_ATTEMPTS.get(key) ?? 0) + 1;
+        FOLLOWUP_ACTIVE_RUN_WAIT_ATTEMPTS.set(key, attempt);
+        activeRunRetryDelayMs = resolveFollowupActiveRunBackoffMs(attempt);
+        defaultRuntime.error?.(
+          `followup queue waiting for active run for ${key}; retrying in ${activeRunRetryDelayMs}ms`,
+        );
+      } else {
+        queue.lastEnqueuedAt = Date.now();
+        defaultRuntime.error?.(`followup queue drain failed for ${key}: ${String(err)}`);
+      }
     } finally {
       queue.draining = false;
       if (queue.items.length === 0 && queue.droppedCount === 0) {
         FOLLOWUP_QUEUES.delete(key);
         clearFollowupDrainCallback(key);
+        FOLLOWUP_ACTIVE_RUN_WAIT_ATTEMPTS.delete(key);
+      } else if (activeRunRetryDelayMs != null) {
+        void replyRunRegistry
+          .waitForIdle(key, activeRunRetryDelayMs)
+          .finally(() => scheduleFollowupDrain(key, effectiveRunFollowup));
       } else {
         scheduleFollowupDrain(key, effectiveRunFollowup);
       }

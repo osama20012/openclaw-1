@@ -39,6 +39,8 @@ const runtimeErrorMock = vi.fn();
 const abortEmbeddedPiRunMock = vi.fn();
 const clearSessionQueuesMock = vi.fn();
 const refreshQueuedFollowupSessionMock = vi.fn();
+const queueEmbeddedPiMessageMock = vi.hoisted(() => vi.fn().mockReturnValue(false));
+const enqueueFollowupRunMock = vi.hoisted(() => vi.fn());
 const compactState = vi.hoisted(() => ({
   compactEmbeddedPiSessionMock: vi.fn(),
 }));
@@ -63,13 +65,20 @@ vi.mock("../../agents/pi-embedded.js", () => {
   return {
     compactEmbeddedPiSession: (params: unknown) =>
       compactState.compactEmbeddedPiSessionMock(params),
-    queueEmbeddedPiMessage: vi.fn().mockReturnValue(false),
     runEmbeddedPiAgent: (params: unknown) => runEmbeddedPiAgentMock(params),
     abortEmbeddedPiRun: (sessionId: string) => {
       abortEmbeddedPiRunMock(sessionId);
       return abortEmbeddedPiRun(sessionId);
     },
     isEmbeddedPiRunActive: (sessionId: string) => isEmbeddedPiRunActive(sessionId),
+  };
+});
+
+vi.mock("../../agents/pi-embedded-runner/runs.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../agents/pi-embedded-runner/runs.js")>();
+  return {
+    ...actual,
+    queueEmbeddedPiMessage: (...args: unknown[]) => queueEmbeddedPiMessageMock(...args),
   };
 });
 
@@ -89,7 +98,7 @@ vi.mock("../../runtime.js", () => {
 
 vi.mock("./queue.js", () => {
   return {
-    enqueueFollowupRun: vi.fn(),
+    enqueueFollowupRun: (...args: unknown[]) => enqueueFollowupRunMock(...args),
     scheduleFollowupDrain: vi.fn(),
     clearSessionQueues: (...args: unknown[]) => clearSessionQueuesMock(...args),
     refreshQueuedFollowupSession: (...args: unknown[]) => refreshQueuedFollowupSessionMock(...args),
@@ -154,6 +163,9 @@ beforeEach(() => {
   clearSessionQueuesMock.mockReturnValue({ followupCleared: 0, laneCleared: 0, keys: [] });
   refreshQueuedFollowupSessionMock.mockReset();
   refreshQueuedFollowupSessionMock.mockResolvedValue(undefined);
+  queueEmbeddedPiMessageMock.mockReset();
+  queueEmbeddedPiMessageMock.mockReturnValue(false);
+  enqueueFollowupRunMock.mockReset();
   loadCronStoreMock.mockClear();
   // Default: no cron jobs in store.
   loadCronStoreMock.mockResolvedValue({ version: 1, jobs: [] });
@@ -173,6 +185,68 @@ afterEach(() => {
   clearMemoryPluginState();
   replyRunRegistryTesting.resetReplyRunRegistry();
   embeddedRunTesting.resetActiveEmbeddedRuns();
+});
+
+describe("runReplyAgent steer anchoring", () => {
+  it("keeps the active run anchor by steering into the existing session instead of queuing a new run", async () => {
+    queueEmbeddedPiMessageMock.mockReturnValue(true);
+
+    const typing = createMockTypingController();
+    const sessionCtx = {
+      Provider: "telegram",
+      OriginatingTo: "chat:1",
+      AccountId: "primary",
+      MessageSid: "msg-1",
+    } as unknown as TemplateContext;
+    const resolvedQueue = { mode: "steer" } as unknown as QueueSettings;
+    const followupRun = {
+      prompt: "follow up",
+      anchorMessageId: "msg-1",
+      summaryLine: "follow up",
+      enqueuedAt: Date.now(),
+      run: {
+        agentId: "main",
+        agentDir: "/tmp/agent",
+        sessionId: "session",
+        sessionKey: "main",
+        messageProvider: "telegram",
+        sessionFile: "/tmp/session.jsonl",
+        workspaceDir: "/tmp",
+        config: {},
+        skillsSnapshot: {},
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        timeoutMs: 30_000,
+        blockReplyBreak: "message_end",
+      },
+    } as unknown as FollowupRun;
+
+    const result = await runReplyAgent({
+      commandBody: "follow up",
+      followupRun,
+      queueKey: "main",
+      resolvedQueue,
+      shouldSteer: true,
+      shouldFollowup: false,
+      isActive: true,
+      isStreaming: true,
+      typing,
+      sessionCtx,
+      defaultModel: "anthropic/claude-opus-4-6",
+      resolvedVerboseLevel: "off",
+      isNewSession: false,
+      blockStreamingEnabled: false,
+      resolvedBlockStreamingBreak: "message_end",
+      shouldInjectGroupIntro: false,
+      typingMode: "instant",
+    });
+
+    expect(result).toBeUndefined();
+    expect(queueEmbeddedPiMessageMock).toHaveBeenCalledWith("session", "follow up");
+    expect(enqueueFollowupRunMock).not.toHaveBeenCalled();
+    expect(followupRun.anchorMessageId).toBe("msg-1");
+    expect(runEmbeddedPiAgentMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("runReplyAgent auto-compaction token update", () => {

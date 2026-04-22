@@ -743,6 +743,7 @@ export async function runPreparedReply(
     prompt: queuedBody,
     transcriptPrompt: transcriptCommandBody,
     messageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,
+    anchorMessageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,
     summaryLine: baseBodyTrimmedRaw,
     enqueuedAt: Date.now(),
     images: opts?.images,
