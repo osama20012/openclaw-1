@@ -41,16 +41,17 @@ export async function loginGeminiCliOAuth(
   }
 
   ctx.progress.update("Complete sign-in in browser...");
-  try {
-    await ctx.openUrl(authUrl);
-  } catch {
-    ctx.log(`\nOpen this URL in your browser:\n\n${authUrl}\n`);
+  const browserOpened = await ctx.openUrl(authUrl).catch(() => false);
+  if (!browserOpened) {
+    ctx.log(`\nBrowser did not open. Open this URL manually:\n\n${authUrl}\n`);
+  } else {
+    ctx.log(`\nOAuth URL (backup — paste in browser if needed):\n${authUrl}\n`);
   }
 
   try {
     const { code } = await waitForLocalCallback({
       expectedState: state,
-      timeoutMs: 5 * 60 * 1000,
+      timeoutMs: 10 * 60 * 1000,
       onProgress: (msg) => ctx.progress.update(msg),
     });
     ctx.progress.update("Exchanging authorization code for tokens...");
