@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,7 +17,8 @@ import {
   type BundledRuntimeDepsInstallParams,
 } from "./bundled-runtime-deps.js";
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
   spawnSync: vi.fn(),
 }));
 
@@ -64,8 +66,12 @@ describe("resolveBundledRuntimeDepsNpmRunner", () => {
         {
           PATH: "/usr/bin:/bin",
           NPM_CONFIG_CACHE: "/Users/alice/.npm-uppercase",
+          NPM_CONFIG_GLOBAL: "true",
+          NPM_CONFIG_LOCATION: "global",
+          NPM_CONFIG_PREFIX: "/Users/alice",
           npm_config_cache: "/Users/alice/.npm",
           npm_config_global: "true",
+          npm_config_location: "global",
           npm_config_prefix: "/opt/homebrew",
         },
         { cacheDir: "/opt/openclaw/runtime-cache" },
@@ -169,6 +175,7 @@ describe("installBundledRuntimeDeps", () => {
   });
 
   it("uses the npm cmd shim on Windows", () => {
+    const installRoot = makeTempDir();
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     vi.spyOn(fs, "existsSync").mockImplementation(
       (candidate) => candidate === "C:\\node\\node_modules\\npm\\bin\\npm-cli.js",
@@ -183,7 +190,7 @@ describe("installBundledRuntimeDeps", () => {
     });
 
     installBundledRuntimeDeps({
-      installRoot: "C:\\openclaw",
+      installRoot,
       missingSpecs: ["acpx@0.5.3"],
       env: {
         npm_config_prefix: "C:\\prefix",
@@ -196,7 +203,7 @@ describe("installBundledRuntimeDeps", () => {
       expect.any(String),
       ["C:\\node\\node_modules\\npm\\bin\\npm-cli.js", "install", "--ignore-scripts", "acpx@0.5.3"],
       expect.objectContaining({
-        cwd: "C:\\openclaw",
+        cwd: installRoot,
         env: expect.objectContaining({
           npm_config_legacy_peer_deps: "true",
           npm_config_package_lock: "false",
@@ -285,10 +292,20 @@ describe("installBundledRuntimeDeps", () => {
       env: {
         HOME: "/Users/alice",
         NPM_CONFIG_CACHE: "/Users/alice/.npm-uppercase",
+        NPM_CONFIG_GLOBAL: "true",
+        NPM_CONFIG_LOCATION: "global",
+        NPM_CONFIG_PREFIX: "/Users/alice",
         npm_config_cache: "/Users/alice/.npm",
+        npm_config_global: "true",
+        npm_config_location: "global",
+        npm_config_prefix: "/opt/homebrew",
       },
     });
 
+    expect(JSON.parse(fs.readFileSync(path.join(installRoot, "package.json"), "utf8"))).toEqual({
+      name: "openclaw-runtime-deps-install",
+      private: true,
+    });
     expect(spawnSyncMock).toHaveBeenCalledWith(
       expect.any(String),
       expect.any(Array),
@@ -306,6 +323,12 @@ describe("installBundledRuntimeDeps", () => {
       expect.objectContaining({
         env: expect.not.objectContaining({
           NPM_CONFIG_CACHE: expect.any(String),
+          NPM_CONFIG_GLOBAL: expect.any(String),
+          NPM_CONFIG_LOCATION: expect.any(String),
+          NPM_CONFIG_PREFIX: expect.any(String),
+          npm_config_global: expect.any(String),
+          npm_config_location: expect.any(String),
+          npm_config_prefix: expect.any(String),
         }),
       }),
     );
@@ -702,6 +725,56 @@ describe("ensureBundledPluginRuntimeDeps", () => {
         installSpecs: ["alpha-runtime@1.0.0", "beta-runtime@2.0.0"],
       },
     ]);
+  });
+
+  it("does not derive a second-generation stage root from external runtime mirrors", () => {
+    const packageRoot = makeTempDir();
+    const stageDir = makeTempDir();
+    fs.writeFileSync(
+      path.join(packageRoot, "package.json"),
+      JSON.stringify({ name: "openclaw", version: "2026.4.25" }),
+    );
+    const pluginRoot = path.join(packageRoot, "dist", "extensions", "telegram");
+    fs.mkdirSync(pluginRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginRoot, "package.json"),
+      JSON.stringify({ dependencies: { grammy: "^1.42.0" } }),
+    );
+    const env = { OPENCLAW_PLUGIN_STAGE_DIR: stageDir };
+    const installRoot = resolveBundledRuntimeDependencyInstallRoot(pluginRoot, { env });
+    const mirroredPluginRoot = path.join(installRoot, "dist", "extensions", "telegram");
+    fs.mkdirSync(mirroredPluginRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(mirroredPluginRoot, "package.json"),
+      JSON.stringify({ dependencies: { grammy: "^1.42.0" } }),
+    );
+    fs.mkdirSync(path.join(installRoot, "node_modules", "grammy"), { recursive: true });
+    fs.writeFileSync(
+      path.join(installRoot, "node_modules", "grammy", "package.json"),
+      JSON.stringify({ name: "grammy", version: "1.42.0" }),
+    );
+
+    const nestedUnknownRoot = path.join(
+      stageDir,
+      `openclaw-unknown-${createHash("sha256").update(path.resolve(installRoot)).digest("hex").slice(0, 12)}`,
+    );
+
+    expect(resolveBundledRuntimeDependencyInstallRoot(mirroredPluginRoot, { env })).toBe(
+      installRoot,
+    );
+    expect(resolveBundledRuntimeDependencyInstallRoot(mirroredPluginRoot, { env })).not.toBe(
+      nestedUnknownRoot,
+    );
+    expect(
+      ensureBundledPluginRuntimeDeps({
+        env,
+        installDeps: () => {
+          throw new Error("mirrored staged deps should not reinstall into a nested stage root");
+        },
+        pluginId: "telegram",
+        pluginRoot: mirroredPluginRoot,
+      }),
+    ).toEqual({ installedSpecs: [], retainSpecs: [] });
   });
 
   it("retains existing staged deps without a retained manifest before shared installs", () => {

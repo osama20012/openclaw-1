@@ -2,13 +2,11 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { normalizeConfiguredMcpServers } from "../../config/mcp-config.js";
 import { applyMergePatch } from "../../config/merge-patch.js";
 import type { CliBackendConfig } from "../../config/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   extractMcpServerMap,
-  loadEnabledBundleMcpConfig,
   type BundleMcpConfig,
   type BundleMcpServerConfig,
 } from "../../plugins/bundle-mcp.js";
@@ -17,6 +15,7 @@ import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "../../shared/string-coerce.js";
+import { loadMergedBundleMcpConfig, toCliBundleMcpServerConfig } from "../bundle-mcp-config.js";
 import { serializeTomlInlineValue } from "./toml-inline.js";
 
 type PreparedCliBundleMcpConfig = {
@@ -408,22 +407,15 @@ export async function prepareCliBundleMcpConfig(params: {
     ) as BundleMcpConfig;
   }
 
-  const bundleConfig = loadEnabledBundleMcpConfig({
+  const bundleConfig = loadMergedBundleMcpConfig({
     workspaceDir: params.workspaceDir,
     cfg: params.config,
+    mapConfiguredServer: toCliBundleMcpServerConfig,
   });
   for (const diagnostic of bundleConfig.diagnostics) {
     params.warn?.(`bundle MCP skipped for ${diagnostic.pluginId}: ${diagnostic.message}`);
   }
   mergedConfig = applyMergePatch(mergedConfig, bundleConfig.config) as BundleMcpConfig;
-  const configuredMcp = normalizeConfiguredMcpServers(params.config?.mcp?.servers);
-  if (Object.keys(configuredMcp).length > 0) {
-    const existingMcpServers = mergedConfig.mcpServers;
-    mergedConfig = {
-      ...mergedConfig,
-      mcpServers: existingMcpServers ? { ...existingMcpServers, ...configuredMcp } : configuredMcp,
-    } satisfies BundleMcpConfig;
-  }
   if (params.additionalConfig) {
     mergedConfig = applyMergePatch(mergedConfig, params.additionalConfig) as BundleMcpConfig;
   }
