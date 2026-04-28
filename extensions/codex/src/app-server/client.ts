@@ -16,9 +16,14 @@ import {
 } from "./protocol.js";
 import { createStdioTransport } from "./transport-stdio.js";
 import { createWebSocketTransport } from "./transport-websocket.js";
-import { closeCodexAppServerTransport, type CodexAppServerTransport } from "./transport.js";
+import {
+  closeCodexAppServerTransport,
+  closeCodexAppServerTransportAndWait,
+  type CodexAppServerTransport,
+} from "./transport.js";
+import { MIN_CODEX_APP_SERVER_VERSION } from "./version.js";
 
-export const MIN_CODEX_APP_SERVER_VERSION = "0.125.0";
+export { MIN_CODEX_APP_SERVER_VERSION } from "./version.js";
 const CODEX_APP_SERVER_PARSE_LOG_MAX = 500;
 
 type PendingRequest = {
@@ -95,6 +100,9 @@ export class CodexAppServerClient {
       ...options,
       headers: options?.headers ?? defaults.headers,
     };
+    if (startOptions.transport === "stdio" && startOptions.commandSource === "managed") {
+      throw new Error("Managed Codex app-server start options must be resolved before spawn.");
+    }
     if (startOptions.transport === "websocket") {
       return new CodexAppServerClient(createWebSocketTransport(startOptions));
     }
@@ -225,13 +233,18 @@ export class CodexAppServerClient {
   }
 
   close(): void {
-    if (this.closed) {
+    if (!this.markClosed(new Error("codex app-server client is closed"))) {
       return;
     }
-    this.closed = true;
-    this.lines.close();
-    this.rejectPendingRequests(new Error("codex app-server client is closed"));
     closeCodexAppServerTransport(this.child);
+  }
+
+  async closeAndWait(options?: {
+    exitTimeoutMs?: number;
+    forceKillDelayMs?: number;
+  }): Promise<void> {
+    this.markClosed(new Error("codex app-server client is closed"));
+    await closeCodexAppServerTransportAndWait(this.child, options);
   }
 
   private writeMessage(message: RpcRequest | RpcResponse): void {
@@ -325,13 +338,19 @@ export class CodexAppServerClient {
   }
 
   private closeWithError(error: Error): void {
+    if (this.markClosed(error)) {
+      closeCodexAppServerTransport(this.child);
+    }
+  }
+
+  private markClosed(error: Error): boolean {
     if (this.closed) {
-      return;
+      return false;
     }
     this.closed = true;
     this.lines.close();
     this.rejectPendingRequests(error);
-    closeCodexAppServerTransport(this.child);
+    return true;
   }
 
   private rejectPendingRequests(error: Error): void {
@@ -392,12 +411,12 @@ function assertSupportedCodexAppServerVersion(response: CodexInitializeResponse)
   const detectedVersion = readCodexVersionFromUserAgent(response.userAgent);
   if (!detectedVersion) {
     throw new Error(
-      `Codex app-server ${MIN_CODEX_APP_SERVER_VERSION} or newer is required, but OpenClaw could not determine the running Codex version. Upgrade Codex CLI and retry.`,
+      `Codex app-server ${MIN_CODEX_APP_SERVER_VERSION} or newer is required, but OpenClaw could not determine the running Codex version. Update the configured Codex app-server binary, or remove custom command overrides to use the managed binary.`,
     );
   }
   if (compareVersions(detectedVersion, MIN_CODEX_APP_SERVER_VERSION) < 0) {
     throw new Error(
-      `Codex app-server ${MIN_CODEX_APP_SERVER_VERSION} or newer is required, but detected ${detectedVersion}. Upgrade Codex CLI and retry.`,
+      `Codex app-server ${MIN_CODEX_APP_SERVER_VERSION} or newer is required, but detected ${detectedVersion}. Update the configured Codex app-server binary, or remove custom command overrides to use the managed binary.`,
     );
   }
 }
@@ -485,5 +504,6 @@ function formatExitValue(value: unknown): string {
 
 export const __testing = {
   closeCodexAppServerTransport,
+  closeCodexAppServerTransportAndWait,
   redactCodexAppServerLinePreview,
 } as const;

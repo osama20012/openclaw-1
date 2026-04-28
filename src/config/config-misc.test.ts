@@ -65,6 +65,28 @@ describe("plugins.slots.contextEngine", () => {
   });
 });
 
+describe("models.pricing", () => {
+  it("accepts the model pricing bootstrap toggle", () => {
+    for (const enabled of [true, false]) {
+      const result = OpenClawSchema.safeParse({
+        models: {
+          pricing: { enabled },
+        },
+      });
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it("rejects non-boolean model pricing bootstrap values", () => {
+    const result = OpenClawSchema.safeParse({
+      models: {
+        pricing: { enabled: "false" },
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe("crestodian.rescue", () => {
   it("accepts documented rescue config", () => {
     const result = OpenClawSchema.safeParse({
@@ -214,7 +236,23 @@ describe("gateway.controlUi.allowExternalEmbedUrls", () => {
 });
 
 describe("plugins.entries.*.hooks", () => {
-  it("accepts boolean values", () => {
+  it.each([true, false])("accepts allowConversationAccess=%s", (allowConversationAccess) => {
+    const result = OpenClawSchema.safeParse({
+      plugins: {
+        entries: {
+          "voice-call": {
+            hooks: {
+              allowPromptInjection: false,
+              allowConversationAccess,
+            },
+          },
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts allowPromptInjection=false alongside allowConversationAccess=true", () => {
     const result = OpenClawSchema.safeParse({
       plugins: {
         entries: {
@@ -626,7 +664,7 @@ describe("model compat config schema", () => {
                   supportsUsageInStreaming: true,
                   supportsStrictMode: false,
                   requiresStringContent: true,
-                  thinkingFormat: "qwen",
+                  thinkingFormat: "zai",
                   requiresToolResultName: true,
                   requiresAssistantAfterToolResult: false,
                   requiresThinkingAsText: false,

@@ -19,8 +19,8 @@ import {
   SecretsConfigSchema,
 } from "./zod-schema.core.js";
 import { HookMappingSchema, HooksGmailSchema, InternalHooksSchema } from "./zod-schema.hooks.js";
-import { PluginInstallRecordShape } from "./zod-schema.installs.js";
 import { ChannelsSchema } from "./zod-schema.providers.js";
+import { ProxyConfigSchema } from "./zod-schema.proxy.js";
 import { sensitive } from "./zod-schema.sensitive.js";
 import {
   CommandsSchema,
@@ -220,6 +220,7 @@ const McpServerSchema = z
     cwd: z.string().optional(),
     workingDirectory: z.string().optional(),
     url: HttpUrlSchema.optional(),
+    transport: z.union([z.literal("sse"), z.literal("streamable-http")]).optional(),
     headers: z
       .record(
         z.string(),
@@ -307,6 +308,9 @@ export const OpenClawSchema = z
           .object({
             enabled: z.boolean().optional(),
             endpoint: z.string().optional(),
+            tracesEndpoint: z.string().optional(),
+            metricsEndpoint: z.string().optional(),
+            logsEndpoint: z.string().optional(),
             protocol: z.union([z.literal("http/protobuf"), z.literal("grpc")]).optional(),
             headers: z.record(z.string(), z.string()).optional(),
             serviceName: z.string().optional(),
@@ -596,6 +600,7 @@ export const OpenClawSchema = z
             enabled: z.boolean().optional(),
             after: z.number().int().min(1).optional(),
             cooldownMs: z.number().int().min(0).optional(),
+            includeSkipped: z.boolean().optional(),
             mode: z.enum(["announce", "webhook"]).optional(),
             accountId: z.string().optional(),
           })
@@ -670,6 +675,14 @@ export const OpenClawSchema = z
             factor: z.number().positive().optional(),
             jitter: z.number().min(0).max(1).optional(),
             maxAttempts: z.number().int().min(0).optional(),
+          })
+          .strict()
+          .optional(),
+        whatsapp: z
+          .object({
+            keepAliveIntervalMs: z.number().int().positive().optional(),
+            connectTimeoutMs: z.number().int().positive().optional(),
+            defaultQueryTimeoutMs: z.number().int().positive().optional(),
           })
           .strict()
           .optional(),
@@ -762,6 +775,7 @@ export const OpenClawSchema = z
                 userHeader: z.string().min(1, "userHeader is required for trusted-proxy mode"),
                 requiredHeaders: z.array(z.string()).optional(),
                 allowUsers: z.array(z.string()).optional(),
+                allowLoopback: z.boolean().optional(),
               })
               .strict()
               .optional(),
@@ -1001,16 +1015,6 @@ export const OpenClawSchema = z
           .strict()
           .optional(),
         entries: z.record(z.string(), PluginEntrySchema).optional(),
-        installs: z
-          .record(
-            z.string(),
-            z
-              .object({
-                ...PluginInstallRecordShape,
-              })
-              .strict(),
-          )
-          .optional(),
       })
       .strict()
       .optional(),
@@ -1025,6 +1029,7 @@ export const OpenClawSchema = z
           .strict(),
       )
       .optional(),
+    proxy: ProxyConfigSchema,
   })
   .strict()
   .superRefine((cfg, ctx) => {

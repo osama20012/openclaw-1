@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import { withTempHome } from "openclaw/plugin-sdk/test-env";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeTestText } from "../../test/helpers/normalize-text.js";
-import { withTempHome } from "../../test/helpers/temp-home.js";
 import { MODEL_CONTEXT_TOKEN_CACHE } from "../agents/context-cache.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { applyModelOverrideToSessionEntry } from "../sessions/model-overrides.js";
@@ -101,6 +101,39 @@ describe("buildStatusMessage", () => {
     expect(normalized).not.toContain("verbose");
     expect(normalized).toContain("elevated");
     expect(normalized).toContain("Queue: collect");
+  });
+
+  it("shows sanitized TTS provider details in the voice status line", async () => {
+    await withTempHome(async () => {
+      const text = buildStatusMessage({
+        config: {
+          messages: {
+            tts: {
+              auto: "always",
+              provider: "openai",
+              providers: {
+                openai: {
+                  displayName: "NeuTTS local",
+                  baseUrl: "http://user:secret@127.0.0.1:18801/v1?token=hidden#fragment",
+                  model: "neutts-nano",
+                  voice: "clara",
+                },
+              },
+            },
+          },
+        } as unknown as OpenClawConfig,
+        agent: {},
+        now: 0,
+      });
+      const normalized = normalizeTestText(text);
+
+      expect(normalized).toContain(
+        "Voice: always · provider=openai · name=NeuTTS local · model=neutts-nano · voice=clara · endpoint=custom(http://127.0.0.1:18801/v1)",
+      );
+      expect(normalized).not.toContain("secret");
+      expect(normalized).not.toContain("token=hidden");
+      expect(normalized).not.toContain("fragment");
+    });
   });
 
   it("shows the model runtime for CLI-backed providers", () => {

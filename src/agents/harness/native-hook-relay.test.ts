@@ -355,7 +355,7 @@ describe("native hook relay registry", () => {
       runId: "run-1",
     });
 
-    for (const event of ["pre_tool_use", "post_tool_use"] as const) {
+    for (const event of ["pre_tool_use", "post_tool_use", "before_agent_finalize"] as const) {
       await expect(
         invokeNativeHookRelay({
           provider: "codex",
@@ -709,6 +709,108 @@ describe("native hook relay registry", () => {
     );
   });
 
+  it("maps Codex Stop to before_agent_finalize revision output", async () => {
+    const beforeAgentFinalize = vi.fn(async () => ({
+      action: "revise",
+      reason: "please run the focused tests before finalizing",
+    }));
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([
+        { hookName: "before_agent_finalize", handler: beforeAgentFinalize },
+      ]),
+    );
+    const relay = registerNativeHookRelay({
+      provider: "codex",
+      agentId: "agent-1",
+      sessionId: "session-1",
+      sessionKey: "agent:main:session-1",
+      runId: "run-1",
+    });
+
+    const response = await invokeNativeHookRelay({
+      provider: "codex",
+      relayId: relay.relayId,
+      event: "before_agent_finalize",
+      rawPayload: {
+        hook_event_name: "Stop",
+        session_id: "codex-session-1",
+        turn_id: "turn-1",
+        cwd: "/repo",
+        transcript_path: "/tmp/session.jsonl",
+        model: "gpt-5.4",
+        permission_mode: "workspace-write",
+        stop_hook_active: true,
+        last_assistant_message: "done",
+      },
+    });
+
+    expect(response).toEqual({
+      stdout: `${JSON.stringify({
+        decision: "block",
+        reason: "please run the focused tests before finalizing",
+      })}\n`,
+      stderr: "",
+      exitCode: 0,
+    });
+    expect(beforeAgentFinalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-1",
+        sessionId: "session-1",
+        sessionKey: "agent:main:session-1",
+        turnId: "turn-1",
+        provider: "codex",
+        model: "gpt-5.4",
+        cwd: "/repo",
+        transcriptPath: "/tmp/session.jsonl",
+        stopHookActive: true,
+        lastAssistantMessage: "done",
+      }),
+      expect.objectContaining({
+        agentId: "agent-1",
+        sessionId: "session-1",
+        sessionKey: "agent:main:session-1",
+        runId: "run-1",
+        workspaceDir: "/repo",
+        modelId: "gpt-5.4",
+      }),
+    );
+  });
+
+  it("maps before_agent_finalize finalize output to Codex continue false", async () => {
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([
+        {
+          hookName: "before_agent_finalize",
+          handler: vi.fn(async () => ({ action: "finalize", reason: "already checked" })),
+        },
+      ]),
+    );
+    const relay = registerNativeHookRelay({
+      provider: "codex",
+      sessionId: "session-1",
+      runId: "run-1",
+    });
+
+    const response = await invokeNativeHookRelay({
+      provider: "codex",
+      relayId: relay.relayId,
+      event: "before_agent_finalize",
+      rawPayload: {
+        hook_event_name: "Stop",
+        stop_hook_active: false,
+      },
+    });
+
+    expect(response).toEqual({
+      stdout: `${JSON.stringify({
+        continue: false,
+        stopReason: "already checked",
+      })}\n`,
+      stderr: "",
+      exitCode: 0,
+    });
+  });
+
   it("maps PermissionRequest approval allow and deny decisions to Codex hook output", async () => {
     const relay = registerNativeHookRelay({
       provider: "codex",
@@ -935,6 +1037,130 @@ describe("native hook relay registry", () => {
 
     expect(approvalRequester).toHaveBeenCalledTimes(12);
     expect(responses.at(-1)).toEqual({ stdout: "", stderr: "", exitCode: 0 });
+  });
+
+  it("deduplicates pending PermissionRequest approvals before consuming approval budget", async () => {
+    const relay = registerNativeHookRelay({
+      provider: "codex",
+      sessionId: "session-1",
+      runId: "run-1",
+    });
+    const resolvers: Array<(decision: "allow") => void> = [];
+    const approvalRequester = vi.fn(
+      () =>
+        new Promise<"allow">((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    __testing.setNativeHookRelayPermissionApprovalRequesterForTests(approvalRequester);
+
+    const duplicatePayload = {
+      hook_event_name: "PermissionRequest",
+      tool_name: "Bash",
+      tool_use_id: "native-call-1",
+      tool_input: { command: "git push" },
+    };
+    const duplicateRequests = Array.from({ length: 12 }, () =>
+      invokeNativeHookRelay({
+        provider: "codex",
+        relayId: relay.relayId,
+        event: "permission_request",
+        rawPayload: duplicatePayload,
+      }),
+    );
+    await Promise.resolve();
+    expect(approvalRequester).toHaveBeenCalledTimes(1);
+
+    const newRequest = invokeNativeHookRelay({
+      provider: "codex",
+      relayId: relay.relayId,
+      event: "permission_request",
+      rawPayload: {
+        ...duplicatePayload,
+        tool_use_id: "native-call-2",
+        tool_input: { command: "curl https://example.com" },
+      },
+    });
+    await Promise.resolve();
+    expect(approvalRequester).toHaveBeenCalledTimes(2);
+
+    for (const resolve of resolvers) {
+      resolve("allow");
+    }
+    await expect(Promise.all([...duplicateRequests, newRequest])).resolves.toHaveLength(13);
+  });
+
+  it("uses canonical PermissionRequest content fingerprints for ordinary objects", () => {
+    const first = __testing.permissionRequestContentFingerprintForTests({
+      provider: "codex",
+      sessionId: "session-1",
+      runId: "run-1",
+      toolName: "exec",
+      toolInput: { a: 1, b: { x: 2, y: 3 } },
+    });
+    const second = __testing.permissionRequestContentFingerprintForTests({
+      provider: "codex",
+      sessionId: "session-1",
+      runId: "run-1",
+      toolName: "exec",
+      toolInput: { b: { y: 3, x: 2 }, a: 1 },
+    });
+
+    expect(second).toBe(first);
+  });
+
+  it("keeps broad PermissionRequest content fingerprints sensitive to tail changes", () => {
+    const firstToolInput = Object.fromEntries(
+      Array.from({ length: 205 }, (_, index) => [`key-${index}`, `value-${index}`]),
+    );
+    const secondToolInput = {
+      ...firstToolInput,
+      "key-204": "changed",
+    };
+
+    expect(
+      __testing.permissionRequestContentFingerprintForTests({
+        provider: "codex",
+        sessionId: "session-1",
+        runId: "run-1",
+        toolName: "exec",
+        toolInput: firstToolInput,
+      }),
+    ).not.toBe(
+      __testing.permissionRequestContentFingerprintForTests({
+        provider: "codex",
+        sessionId: "session-1",
+        runId: "run-1",
+        toolName: "exec",
+        toolInput: secondToolInput,
+      }),
+    );
+  });
+
+  it("fingerprints broad PermissionRequest inputs without Object.keys enumeration", () => {
+    const toolInput = Object.fromEntries(
+      Array.from({ length: 300 }, (_, index) => [`key-${index}`, `value-${index}`]),
+    );
+    const objectKeys = vi.spyOn(Object, "keys").mockImplementation(() => {
+      throw new Error("Object.keys should not be used for permission fingerprints");
+    });
+
+    try {
+      expect(__testing.permissionRequestToolInputKeyFingerprintForTests(toolInput)).toContain(
+        "key-",
+      );
+      expect(
+        __testing.permissionRequestContentFingerprintForTests({
+          provider: "codex",
+          sessionId: "session-1",
+          runId: "run-1",
+          toolName: "exec",
+          toolInput,
+        }),
+      ).toMatch(/^[a-f0-9]{64}$/);
+    } finally {
+      objectKeys.mockRestore();
+    }
   });
 
   it("sanitizes PermissionRequest approval previews and reports omitted keys", () => {

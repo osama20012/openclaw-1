@@ -171,7 +171,12 @@ describe("scripts/lib/ci-node-test-plan.mjs", () => {
     expect(agentShard).toEqual({
       checkName: "checks-node-agentic-agents",
       shardName: "agentic-agents",
-      configs: ["test/vitest/vitest.agents.config.ts"],
+      configs: [
+        "test/vitest/vitest.agents-core.config.ts",
+        "test/vitest/vitest.agents-pi-embedded.config.ts",
+        "test/vitest/vitest.agents-support.config.ts",
+        "test/vitest/vitest.agents-tools.config.ts",
+      ],
       requiresDist: false,
     });
     expect(pluginSdkShard).toEqual({
@@ -216,10 +221,16 @@ describe("scripts/lib/ci-node-test-plan.mjs", () => {
         shardName: "auto-reply-core-top-level",
       },
       {
-        checkName: "checks-node-auto-reply-reply-agent-dispatch",
+        checkName: "checks-node-auto-reply-reply-agent-runner",
         configs: ["test/vitest/vitest.auto-reply-reply.config.ts"],
         requiresDist: false,
-        shardName: "auto-reply-reply-agent-dispatch",
+        shardName: "auto-reply-reply-agent-runner",
+      },
+      {
+        checkName: "checks-node-auto-reply-reply-dispatch",
+        configs: ["test/vitest/vitest.auto-reply-reply.config.ts"],
+        requiresDist: false,
+        shardName: "auto-reply-reply-dispatch",
       },
       {
         checkName: "checks-node-auto-reply-reply-commands-state-routing",

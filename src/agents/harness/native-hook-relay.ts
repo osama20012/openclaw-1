@@ -7,6 +7,7 @@ import { runBeforeToolCallHook } from "../pi-tools.before-tool-call.js";
 import { normalizeToolName } from "../tool-policy.js";
 import { callGatewayTool } from "../tools/gateway.js";
 import { runAgentHarnessAfterToolCallHook } from "./hook-helpers.js";
+import { runAgentHarnessBeforeAgentFinalizeHook } from "./lifecycle-hook-helpers.js";
 
 export type JsonValue =
   | null
@@ -20,6 +21,7 @@ export const NATIVE_HOOK_RELAY_EVENTS = [
   "pre_tool_use",
   "post_tool_use",
   "permission_request",
+  "before_agent_finalize",
 ] as const;
 
 export const NATIVE_HOOK_RELAY_PROVIDERS = ["codex"] as const;
@@ -38,6 +40,11 @@ export type NativeHookRelayInvocation = {
   runId: string;
   cwd?: string;
   model?: string;
+  turnId?: string;
+  transcriptPath?: string;
+  permissionMode?: string;
+  stopHookActive?: boolean;
+  lastAssistantMessage?: string;
   toolName?: string;
   toolUseId?: string;
   rawPayload: JsonValue;
@@ -93,7 +100,19 @@ export type InvokeNativeHookRelayParams = {
 };
 
 type NativeHookRelayInvocationMetadata = Partial<
-  Pick<NativeHookRelayInvocation, "nativeEventName" | "cwd" | "model" | "toolName" | "toolUseId">
+  Pick<
+    NativeHookRelayInvocation,
+    | "nativeEventName"
+    | "cwd"
+    | "model"
+    | "turnId"
+    | "transcriptPath"
+    | "permissionMode"
+    | "stopHookActive"
+    | "lastAssistantMessage"
+    | "toolName"
+    | "toolUseId"
+  >
 >;
 
 type NativeHookRelayProviderAdapter = {
@@ -102,6 +121,8 @@ type NativeHookRelayProviderAdapter = {
   readToolResponse: (rawPayload: JsonValue) => unknown;
   renderNoopResponse: (event: NativeHookRelayEvent) => NativeHookRelayProcessResponse;
   renderPreToolUseBlockResponse: (reason: string) => NativeHookRelayProcessResponse;
+  renderBeforeAgentFinalizeReviseResponse: (reason: string) => NativeHookRelayProcessResponse;
+  renderBeforeAgentFinalizeStopResponse: (reason?: string) => NativeHookRelayProcessResponse;
   renderPermissionDecisionResponse: (
     decision: NativeHookRelayPermissionDecision,
     message?: string,
@@ -122,6 +143,7 @@ const MAX_NATIVE_HOOK_RELAY_HISTORY_ARRAY_ITEMS = 50;
 const MAX_NATIVE_HOOK_RELAY_HISTORY_OBJECT_KEYS = 50;
 const MAX_PERMISSION_FALLBACK_KEYS = 200;
 const MAX_PERMISSION_FALLBACK_KEY_CHARS = 240;
+const MAX_PERMISSION_FINGERPRINT_SORT_KEYS = 200;
 const MAX_APPROVAL_TITLE_LENGTH = 80;
 const MAX_APPROVAL_DESCRIPTION_LENGTH = 700;
 const MAX_PERMISSION_APPROVALS_PER_WINDOW = 12;
@@ -180,6 +202,22 @@ const nativeHookRelayProviderAdapters: Record<
           permissionDecision: "deny",
           permissionDecisionReason: reason,
         },
+      })}\n`,
+      stderr: "",
+      exitCode: 0,
+    }),
+    renderBeforeAgentFinalizeReviseResponse: (reason) => ({
+      stdout: `${JSON.stringify({
+        decision: "block",
+        reason,
+      })}\n`,
+      stderr: "",
+      exitCode: 0,
+    }),
+    renderBeforeAgentFinalizeStopResponse: (reason) => ({
+      stdout: `${JSON.stringify({
+        continue: false,
+        ...(reason?.trim() ? { stopReason: reason.trim() } : {}),
       })}\n`,
       stderr: "",
       exitCode: 0,
@@ -366,6 +404,9 @@ async function processNativeHookRelayInvocation(params: {
   if (params.invocation.event === "post_tool_use") {
     return runNativeHookRelayPostToolUse(params);
   }
+  if (params.invocation.event === "before_agent_finalize") {
+    return runNativeHookRelayBeforeAgentFinalize(params);
+  }
   return runNativeHookRelayPermissionRequest(params);
 }
 
@@ -442,7 +483,7 @@ async function runNativeHookRelayPermissionRequest(params: {
   const pendingApproval = pendingPermissionApprovals.get(approvalKey);
   try {
     const decision = await (pendingApproval ??
-      requestNativeHookRelayPermissionApprovalWithBudget({
+      startNativeHookRelayPermissionApprovalWithBudget({
         registration: params.registration,
         approvalKey,
         request,
@@ -463,7 +504,47 @@ async function runNativeHookRelayPermissionRequest(params: {
   return params.adapter.renderNoopResponse(params.invocation.event);
 }
 
-async function requestNativeHookRelayPermissionApprovalWithBudget(params: {
+async function runNativeHookRelayBeforeAgentFinalize(params: {
+  registration: NativeHookRelayRegistration;
+  invocation: NativeHookRelayInvocation;
+  adapter: NativeHookRelayProviderAdapter;
+}): Promise<NativeHookRelayProcessResponse> {
+  const outcome = await runAgentHarnessBeforeAgentFinalizeHook({
+    event: {
+      runId: params.registration.runId,
+      sessionId: params.registration.sessionId,
+      ...(params.registration.sessionKey ? { sessionKey: params.registration.sessionKey } : {}),
+      ...(params.invocation.turnId ? { turnId: params.invocation.turnId } : {}),
+      provider: params.registration.provider,
+      ...(params.invocation.model ? { model: params.invocation.model } : {}),
+      ...(params.invocation.cwd ? { cwd: params.invocation.cwd } : {}),
+      ...(params.invocation.transcriptPath
+        ? { transcriptPath: params.invocation.transcriptPath }
+        : {}),
+      stopHookActive: params.invocation.stopHookActive === true,
+      ...(params.invocation.lastAssistantMessage
+        ? { lastAssistantMessage: params.invocation.lastAssistantMessage }
+        : {}),
+    },
+    ctx: {
+      ...(params.registration.agentId ? { agentId: params.registration.agentId } : {}),
+      sessionId: params.registration.sessionId,
+      ...(params.registration.sessionKey ? { sessionKey: params.registration.sessionKey } : {}),
+      runId: params.registration.runId,
+      ...(params.invocation.cwd ? { workspaceDir: params.invocation.cwd } : {}),
+      ...(params.invocation.model ? { modelId: params.invocation.model } : {}),
+    },
+  });
+  if (outcome.action === "revise") {
+    return params.adapter.renderBeforeAgentFinalizeReviseResponse(outcome.reason);
+  }
+  if (outcome.action === "finalize") {
+    return params.adapter.renderBeforeAgentFinalizeStopResponse(outcome.reason);
+  }
+  return params.adapter.renderNoopResponse(params.invocation.event);
+}
+
+async function startNativeHookRelayPermissionApprovalWithBudget(params: {
   registration: NativeHookRelayRegistration;
   approvalKey: string;
   request: NativeHookRelayPermissionApprovalRequest;
@@ -505,18 +586,18 @@ function permissionRequestFallbackKey(request: NativeHookRelayPermissionApproval
 
 function permissionRequestToolInputKeyFingerprint(toolInput: Record<string, unknown>): string {
   let fingerprint = "";
-  let processed = 0;
-  for (const key of Object.keys(toolInput).toSorted()) {
-    if (processed >= MAX_PERMISSION_FALLBACK_KEYS) {
-      break;
-    }
+  const { keys, truncated } = readBoundedOwnKeys(toolInput, MAX_PERMISSION_FALLBACK_KEYS);
+  for (const key of keys) {
     const separator = fingerprint ? "," : "";
     const remaining = MAX_PERMISSION_FALLBACK_KEY_CHARS - fingerprint.length - separator.length;
     if (remaining <= 0) {
       break;
     }
     fingerprint += `${separator}${key.slice(0, remaining)}`;
-    processed += 1;
+  }
+  if (truncated && fingerprint.length < MAX_PERMISSION_FALLBACK_KEY_CHARS) {
+    const marker = `${fingerprint ? "," : ""}...`;
+    fingerprint += marker.slice(0, MAX_PERMISSION_FALLBACK_KEY_CHARS - fingerprint.length);
   }
   return fingerprint || "none";
 }
@@ -559,13 +640,49 @@ function updateJsonHash(hash: ReturnType<typeof createHash>, value: JsonValue): 
     return;
   }
   hash.update("{");
-  for (const key of Object.keys(value).toSorted()) {
+  const { keys, truncated } = readBoundedOwnKeys(value, MAX_PERMISSION_FINGERPRINT_SORT_KEYS);
+  for (const key of keys) {
     hash.update(JSON.stringify(key));
     hash.update(":");
     updateJsonHash(hash, value[key]);
     hash.update(",");
   }
+  if (truncated) {
+    // Keep ordinary objects order-independent without sorting a broad native
+    // hook payload. The tail remains content-sensitive in traversal order.
+    const sortedKeySet = new Set(keys);
+    hash.update("#object-tail:");
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key) || sortedKeySet.has(key)) {
+        continue;
+      }
+      hash.update(JSON.stringify(key));
+      hash.update(":");
+      updateJsonHash(hash, value[key]);
+      hash.update(",");
+    }
+  }
   hash.update("}");
+}
+
+function readBoundedOwnKeys(
+  value: Record<string, unknown>,
+  maxKeys: number,
+): { keys: string[]; truncated: boolean } {
+  const keys: string[] = [];
+  let truncated = false;
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) {
+      continue;
+    }
+    if (keys.length >= maxKeys) {
+      truncated = true;
+      break;
+    }
+    keys.push(key);
+  }
+  keys.sort();
+  return { keys, truncated };
 }
 
 function consumeNativeHookRelayPermissionBudget(relayId: string, now = Date.now()): boolean {
@@ -682,6 +799,26 @@ function normalizeCodexHookMetadata(rawPayload: JsonValue): NativeHookRelayInvoc
   const model = readOptionalString(payload.model);
   if (model) {
     metadata.model = model;
+  }
+  const turnId = readOptionalString(payload.turn_id);
+  if (turnId) {
+    metadata.turnId = turnId;
+  }
+  const transcriptPath = readOptionalString(payload.transcript_path);
+  if (transcriptPath) {
+    metadata.transcriptPath = transcriptPath;
+  }
+  const permissionMode = readOptionalString(payload.permission_mode);
+  if (permissionMode) {
+    metadata.permissionMode = permissionMode;
+  }
+  const stopHookActive = readOptionalBoolean(payload.stop_hook_active);
+  if (stopHookActive !== undefined) {
+    metadata.stopHookActive = stopHookActive;
+  }
+  const lastAssistantMessage = readOptionalString(payload.last_assistant_message);
+  if (lastAssistantMessage) {
+    metadata.lastAssistantMessage = lastAssistantMessage;
   }
   const toolName = readOptionalString(payload.tool_name);
   if (toolName) {
@@ -913,7 +1050,12 @@ function readNativeHookRelayProvider(value: unknown): NativeHookRelayProvider {
 }
 
 function readNativeHookRelayEvent(value: unknown): NativeHookRelayEvent {
-  if (value === "pre_tool_use" || value === "post_tool_use" || value === "permission_request") {
+  if (
+    value === "pre_tool_use" ||
+    value === "post_tool_use" ||
+    value === "permission_request" ||
+    value === "before_agent_finalize"
+  ) {
     return value;
   }
   throw new Error("unsupported native hook relay event");
@@ -928,6 +1070,10 @@ function readNonEmptyString(value: unknown, name: string): string {
 
 function readOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function isJsonValue(value: unknown): value is JsonValue {
@@ -1031,6 +1177,14 @@ export const __testing = {
     request: NativeHookRelayPermissionApprovalRequest,
   ): string {
     return formatPermissionApprovalDescription(request);
+  },
+  permissionRequestContentFingerprintForTests(
+    request: NativeHookRelayPermissionApprovalRequest,
+  ): string {
+    return permissionRequestContentFingerprint(request);
+  },
+  permissionRequestToolInputKeyFingerprintForTests(toolInput: Record<string, unknown>): string {
+    return permissionRequestToolInputKeyFingerprint(toolInput);
   },
   setNativeHookRelayPermissionApprovalRequesterForTests(
     requester: NativeHookRelayPermissionApprovalRequester,

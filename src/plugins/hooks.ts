@@ -14,6 +14,8 @@ import type {
   PluginHookAfterToolCallEvent,
   PluginHookAgentContext,
   PluginHookAgentEndEvent,
+  PluginHookBeforeAgentFinalizeEvent,
+  PluginHookBeforeAgentFinalizeResult,
   PluginHookBeforeAgentReplyEvent,
   PluginHookBeforeAgentReplyResult,
   PluginHookBeforeAgentStartEvent,
@@ -39,6 +41,14 @@ import type {
   PluginHookBeforeResetEvent,
   PluginHookBeforeToolCallEvent,
   PluginHookBeforeToolCallResult,
+  PluginAgentTurnPrepareEvent,
+  PluginAgentTurnPrepareResult,
+  PluginHeartbeatPromptContributionEvent,
+  PluginHeartbeatPromptContributionResult,
+  PluginHookCronChangedEvent,
+  PluginHookGatewayCronDeliveryStatus,
+  PluginHookGatewayCronJobState,
+  PluginHookGatewayCronRunStatus,
   PluginHookGatewayContext,
   PluginHookGatewayStartEvent,
   PluginHookGatewayStopEvent,
@@ -91,6 +101,8 @@ export type {
   PluginHookModelCallStartedEvent,
   PluginHookLlmInputEvent,
   PluginHookLlmOutputEvent,
+  PluginHookBeforeAgentFinalizeEvent,
+  PluginHookBeforeAgentFinalizeResult,
   PluginHookAgentEndEvent,
   PluginHookBeforeCompactionEvent,
   PluginHookBeforeResetEvent,
@@ -122,6 +134,10 @@ export type {
   PluginHookSubagentSpawningResult,
   PluginHookSubagentSpawnedEvent,
   PluginHookSubagentEndedEvent,
+  PluginHookCronChangedEvent,
+  PluginHookGatewayCronDeliveryStatus,
+  PluginHookGatewayCronJobState,
+  PluginHookGatewayCronRunStatus,
   PluginHookGatewayContext,
   PluginHookGatewayStartEvent,
   PluginHookGatewayStopEvent,
@@ -147,6 +163,23 @@ export type HookRunnerOptions = {
    * Defaults to fail-open unless explicitly overridden for a hook name.
    */
   failurePolicyByHook?: Partial<Record<PluginHookName, HookFailurePolicy>>;
+  /**
+   * Optional timeout for void/observation hooks. A timed-out hook is logged and
+   * the runner continues, but the plugin's underlying work is not cancelled.
+   */
+  voidHookTimeoutMsByHook?: Partial<Record<PluginHookName, number>>;
+  /**
+   * Optional timeout for modifying hooks. A timed-out hook is logged and skipped,
+   * but the plugin's underlying work is not cancelled.
+   */
+  modifyingHookTimeoutMsByHook?: Partial<Record<PluginHookName, number>>;
+};
+
+const DEFAULT_VOID_HOOK_TIMEOUT_MS_BY_HOOK: Partial<Record<PluginHookName, number>> = {
+  agent_end: 30_000,
+};
+const DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK: Partial<Record<PluginHookName, number>> = {
+  before_prompt_build: 15_000,
 };
 
 type ModifyingHookPolicy<K extends PluginHookName, TResult> = {
@@ -215,6 +248,14 @@ export function createHookRunner(
   const logger = options.logger;
   const catchErrors = options.catchErrors ?? true;
   const failurePolicyByHook = options.failurePolicyByHook ?? {};
+  const voidHookTimeoutMsByHook = {
+    ...DEFAULT_VOID_HOOK_TIMEOUT_MS_BY_HOOK,
+    ...options.voidHookTimeoutMsByHook,
+  };
+  const modifyingHookTimeoutMsByHook = {
+    ...DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK,
+    ...options.modifyingHookTimeoutMsByHook,
+  };
 
   const shouldCatchHookErrors = (hookName: PluginHookName): boolean =>
     catchErrors && (failurePolicyByHook[hookName] ?? "fail-open") === "fail-open";
@@ -243,6 +284,10 @@ export function createHookRunner(
       left: acc?.prependContext,
       right: next.prependContext,
     }),
+    appendContext: concatOptionalTextSegments({
+      left: acc?.appendContext,
+      right: next.appendContext,
+    }),
     prependSystemContext: concatOptionalTextSegments({
       left: acc?.prependSystemContext,
       right: next.prependSystemContext,
@@ -252,6 +297,51 @@ export function createHookRunner(
       right: next.appendSystemContext,
     }),
   });
+
+  const mergeAgentTurnPrepare = <
+    TResult extends { prependContext?: string; appendContext?: string },
+  >(
+    acc: TResult | undefined,
+    next: TResult,
+  ): TResult =>
+    ({
+      prependContext: concatOptionalTextSegments({
+        left: acc?.prependContext,
+        right: next.prependContext,
+      }),
+      appendContext: concatOptionalTextSegments({
+        left: acc?.appendContext,
+        right: next.appendContext,
+      }),
+    }) as TResult;
+
+  const mergeBeforeAgentFinalize = (
+    acc: PluginHookBeforeAgentFinalizeResult | undefined,
+    next: PluginHookBeforeAgentFinalizeResult,
+  ): PluginHookBeforeAgentFinalizeResult => {
+    if (acc?.action === "finalize") {
+      return acc;
+    }
+    if (next.action === "finalize") {
+      return { action: "finalize", reason: next.reason };
+    }
+    if (acc?.action === "revise" && next.action === "revise") {
+      return {
+        action: "revise",
+        reason: concatOptionalTextSegments({
+          left: acc.reason,
+          right: next.reason,
+        }),
+      };
+    }
+    if (acc?.action === "revise") {
+      return acc;
+    }
+    if (next.action === "revise") {
+      return { action: "revise", reason: next.reason };
+    }
+    return next.action === "continue" ? { action: "continue", reason: next.reason } : (acc ?? next);
+  };
 
   const mergeSubagentSpawningResult = (
     acc: PluginHookSubagentSpawningResult | undefined,
@@ -307,6 +397,46 @@ export function createHookRunner(
     return typeof (value as { then?: unknown }).then === "function";
   };
 
+  const getVoidHookTimeoutMs = (hookName: PluginHookName): number | undefined => {
+    const timeoutMs = voidHookTimeoutMsByHook[hookName];
+    if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return undefined;
+    }
+    return Math.floor(timeoutMs);
+  };
+
+  const getModifyingHookTimeoutMs = (hookName: PluginHookName): number | undefined => {
+    const timeoutMs = modifyingHookTimeoutMsByHook[hookName];
+    if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return undefined;
+    }
+    return Math.floor(timeoutMs);
+  };
+
+  const withHookTimeout = async <T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    options: { unref?: boolean } = {},
+  ): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      if (options.unref) {
+        timer.unref?.();
+      }
+    });
+
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+  };
+
   const runSyncHookHandler = <K extends SyncHookName>(
     hook: PluginHookRegistration<K>,
     event: SyncHookEvent<K>,
@@ -334,7 +464,15 @@ export function createHookRunner(
 
     const promises = hooks.map(async (hook) => {
       try {
-        await (hook.handler as (event: unknown, ctx: unknown) => Promise<void>)(event, ctx);
+        const promise = Promise.resolve(
+          (hook.handler as (event: unknown, ctx: unknown) => Promise<void> | void)(event, ctx),
+        );
+        const timeoutMs = getVoidHookTimeoutMs(hookName);
+        if (timeoutMs) {
+          await withHookTimeout(promise, timeoutMs, { unref: true });
+        } else {
+          await promise;
+        }
       } catch (err) {
         handleHookError({ hookName, pluginId: hook.pluginId, error: err });
       }
@@ -364,9 +502,10 @@ export function createHookRunner(
 
     for (const hook of hooks) {
       try {
-        const handlerResult = await (
-          hook.handler as (event: unknown, ctx: unknown) => Promise<TResult>
-        )(event, ctx);
+        const handler = hook.handler as (event: unknown, ctx: unknown) => Promise<TResult>;
+        const promise = Promise.resolve(handler(event, ctx));
+        const timeoutMs = getModifyingHookTimeoutMs(hookName);
+        const handlerResult = timeoutMs ? await withHookTimeout(promise, timeoutMs) : await promise;
 
         if (handlerResult !== undefined && handlerResult !== null) {
           if (policy.mergeResults) {
@@ -555,6 +694,18 @@ export function createHookRunner(
     );
   }
 
+  async function runAgentTurnPrepare(
+    event: PluginAgentTurnPrepareEvent,
+    ctx: PluginHookAgentContext,
+  ): Promise<PluginAgentTurnPrepareResult | undefined> {
+    return runModifyingHook<"agent_turn_prepare", PluginAgentTurnPrepareResult>(
+      "agent_turn_prepare",
+      event,
+      ctx,
+      { mergeResults: mergeAgentTurnPrepare },
+    );
+  }
+
   /**
    * Run before_agent_start hook.
    * Legacy compatibility hook that combines model resolve + prompt build phases.
@@ -644,6 +795,23 @@ export function createHookRunner(
    */
   async function runLlmOutput(event: PluginHookLlmOutputEvent, ctx: PluginHookAgentContext) {
     return runVoidHook("llm_output", event, ctx);
+  }
+
+  /**
+   * Run before_agent_finalize hook.
+   * Allows plugins to request one more model pass before a natural final reply
+   * is accepted. This is not the user-facing /stop cancellation path.
+   */
+  async function runBeforeAgentFinalize(
+    event: PluginHookBeforeAgentFinalizeEvent,
+    ctx: PluginHookAgentContext,
+  ): Promise<PluginHookBeforeAgentFinalizeResult | undefined> {
+    return runModifyingHook<"before_agent_finalize", PluginHookBeforeAgentFinalizeResult>(
+      "before_agent_finalize",
+      withAgentRunId(event, ctx),
+      ctx,
+      { mergeResults: mergeBeforeAgentFinalize },
+    );
   }
 
   /**
@@ -1093,6 +1261,26 @@ export function createHookRunner(
     return runVoidHook("gateway_stop", event, ctx);
   }
 
+  async function runHeartbeatPromptContribution(
+    event: PluginHeartbeatPromptContributionEvent,
+    ctx: PluginHookAgentContext,
+  ): Promise<PluginHeartbeatPromptContributionResult | undefined> {
+    return runModifyingHook<
+      "heartbeat_prompt_contribution",
+      PluginHeartbeatPromptContributionResult
+    >("heartbeat_prompt_contribution", event, ctx, { mergeResults: mergeAgentTurnPrepare });
+  }
+
+  /**
+   * Run cron_changed hook for gateway-owned cron lifecycle changes.
+   */
+  async function runCronChanged(
+    event: PluginHookCronChangedEvent,
+    ctx: PluginHookGatewayContext,
+  ): Promise<void> {
+    return runVoidHook("cron_changed", event, ctx);
+  }
+
   // =========================================================================
   // Skill Install Hooks
   // =========================================================================
@@ -1149,6 +1337,7 @@ export function createHookRunner(
   return {
     // Agent hooks
     runBeforeModelResolve,
+    runAgentTurnPrepare,
     runBeforePromptBuild,
     runBeforeAgentStart,
     runBeforeAgentReply,
@@ -1156,6 +1345,7 @@ export function createHookRunner(
     runModelCallEnded,
     runLlmInput,
     runLlmOutput,
+    runBeforeAgentFinalize,
     runAgentEnd,
     runBeforeCompaction,
     runAfterCompaction,
@@ -1185,6 +1375,8 @@ export function createHookRunner(
     // Gateway hooks
     runGatewayStart,
     runGatewayStop,
+    runHeartbeatPromptContribution,
+    runCronChanged,
     // Install hooks
     runBeforeInstall,
     // Utility

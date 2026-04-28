@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startQaLabServer } from "./lab-server.js";
 
-vi.mock("openclaw/plugin-sdk/qa-channel", async () => await import("../../qa-channel/api.js"));
+vi.mock("@openclaw/qa-channel/api.js", async () => await import("../../qa-channel/api.js"));
 
 const captureMock = vi.hoisted(() => {
   const sessions: Array<Record<string, unknown>> = [];
@@ -85,6 +85,7 @@ const captureMock = vi.hoisted(() => {
     readBlob() {
       return null;
     },
+    close: vi.fn(),
     deleteSessions(sessionIds: string[]) {
       const ids = new Set(sessionIds);
       for (let index = sessions.length - 1; index >= 0; index -= 1) {
@@ -106,11 +107,16 @@ const captureMock = vi.hoisted(() => {
     reset() {
       sessions.splice(0);
       events.splice(0);
+      store.close.mockClear();
     },
   };
 });
 
 vi.mock("openclaw/plugin-sdk/proxy-capture", () => ({
+  acquireDebugProxyCaptureStore: () => ({
+    store: captureMock.store,
+    release: captureMock.store.close,
+  }),
   getDebugProxyCaptureStore: () => captureMock.store,
   resolveDebugProxySettings: () => ({
     dbPath: process.env.OPENCLAW_DEBUG_PROXY_DB_PATH ?? "",

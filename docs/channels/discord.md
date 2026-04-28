@@ -105,6 +105,7 @@ openclaw gateway
 ```
 
     If OpenClaw is already running as a background service, restart it via the OpenClaw Mac app or by stopping and restarting the `openclaw gateway run` process.
+    For managed service installs, run `openclaw gateway install` from a shell where `DISCORD_BOT_TOKEN` is present, or store the variable in `~/.openclaw/.env`, so the service can resolve the env SecretRef after restart.
 
   </Step>
 
@@ -216,6 +217,8 @@ Once DMs are working, you can set up your Discord server as a full workspace whe
   <Step title="Allow responses without @mention">
     By default, your agent only responds in guild channels when @mentioned. For a private server, you probably want it to respond to every message.
 
+    In guild channels, normal assistant final replies stay private by default. Visible Discord output must be sent explicitly with the `message` tool, so the agent can lurk by default and only post when it decides a channel reply is useful.
+
     <Tabs>
       <Tab title="Ask your agent">
         > "Allow my agent to respond on this server without having to be @mentioned"
@@ -236,6 +239,8 @@ Once DMs are working, you can set up your Discord server as a full workspace whe
   },
 }
 ```
+
+        To restore legacy automatic final replies for group/channel rooms, set `messages.groupChat.visibleReplies: "automatic"`.
 
       </Tab>
     </Tabs>
@@ -263,6 +268,10 @@ Now create some channels on your Discord server and start chatting. Your agent c
 
 - Gateway owns the Discord connection.
 - Reply routing is deterministic: Discord inbound replies back to Discord.
+- Discord guild/channel metadata is added to the model prompt as untrusted
+  context, not as a user-visible reply prefix. If a model copies that envelope
+  back, OpenClaw strips the copied metadata from outbound replies and from
+  future replay context.
 - By default (`session.dmScope=main`), direct chats share the agent main session (`agent:main:main`).
 - Guild channels are isolated session keys (`agent:<agentId>:discord:channel:<channelId>`).
 - Group DMs are ignored by default (`channels.discord.dm.groupEnabled=false`).
@@ -581,6 +590,7 @@ Default slash command settings:
     Thread behavior:
 
     - Discord threads route as channel sessions and inherit parent channel config unless overridden.
+    - Thread sessions inherit the parent channel's session-level `/model` selection as a model-only fallback; thread-local `/model` selections still take precedence and parent transcript history is not copied unless transcript inheritance is enabled.
     - `channels.discord.thread.inheritParent` (default `false`) opts new auto-threads into seeding from the parent transcript. Per-account overrides live under `channels.discord.accounts.<id>.thread.inheritParent`.
     - Message-tool reactions can resolve `user:<id>` DM targets.
     - `guilds.<guild>.channels.<channel>.requireMention: false` is preserved during reply-stage activation fallback.
