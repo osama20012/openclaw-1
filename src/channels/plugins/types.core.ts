@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { TSchema } from "typebox";
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import type { MsgContext } from "../../auto-reply/templating.js";
-import type { MarkdownTableMode } from "../../config/types.base.js";
+import type { MarkdownTableMode, ReplyToMode } from "../../config/types.base.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { GatewayClientMode, GatewayClientName } from "../../gateway/protocol/client-info.js";
 import type { MessagePresentation } from "../../interactive/payload.js";
@@ -744,6 +744,8 @@ export type ChannelPollContext = {
   to: string;
   poll: PollInput;
   accountId?: string | null;
+  replyToId?: string | null;
+  replyToMode?: ReplyToMode;
   threadId?: string | null;
   silent?: boolean;
   isAnonymous?: boolean;

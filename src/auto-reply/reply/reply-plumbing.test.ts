@@ -11,7 +11,6 @@ import {
 import type { TemplateContext } from "../templating.js";
 import { buildThreadingToolContext } from "./agent-runner-utils.js";
 import { resolveFollowupDeliveryPayloads } from "./followup-delivery.js";
-import { applyReplyThreading } from "./reply-payloads.js";
 import {
   clearFollowupDrainCallback,
   getFollowupQueueCountersForTest,
@@ -20,10 +19,8 @@ import {
 } from "./queue/drain.js";
 import { clearFollowupQueue, getFollowupQueue } from "./queue/state.js";
 import type { FollowupRun } from "./queue/types.js";
-import {
-  ReplyRunAlreadyActiveError,
-  replyRunRegistry,
-} from "./reply-run-registry.js";
+import { applyReplyThreading } from "./reply-payloads.js";
+import { ReplyRunAlreadyActiveError, replyRunRegistry } from "./reply-run-registry.js";
 import {
   formatRunLabel,
   formatRunStatus,
@@ -482,7 +479,7 @@ describe("collect queue anchoring", () => {
     resetFollowupQueueCountersForTest();
   });
 
-  it("uses the first queued message as the stable anchor for collected runs", async () => {
+  it("uses the latest queued message as the reply anchor for collected runs", async () => {
     const queue = getFollowupQueue(COLLECT_QUEUE_KEY, {
       mode: "collect",
       debounceMs: 0,
@@ -498,7 +495,7 @@ describe("collect queue anchoring", () => {
     });
 
     const collected = await waitForDeliveredRun(() => delivered[0]);
-    expect(collected.anchorMessageId).toBe("111");
+    expect(collected.anchorMessageId).toBe("222");
     expect(collected.prompt).toContain("Queued #1");
     expect(collected.prompt).toContain("Queued #2");
   });
@@ -528,11 +525,8 @@ describe("collect queue anchoring", () => {
       delivered.push(queued);
     });
 
-    await waitForDeliveredRun(
-      () =>
-        getFollowupQueueCountersForTest().followup_wait_active_run_total === 1
-          ? true
-          : undefined,
+    await waitForDeliveredRun(() =>
+      getFollowupQueueCountersForTest().followup_wait_active_run_total === 1 ? true : undefined,
     );
     expect(attempts).toBe(1);
     active.complete();

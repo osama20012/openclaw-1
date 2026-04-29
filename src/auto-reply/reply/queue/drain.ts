@@ -11,10 +11,7 @@ import {
   previewQueueSummaryPrompt,
   waitForQueueDebounce,
 } from "../../../utils/queue-helpers.js";
-import {
-  ReplyRunAlreadyActiveError,
-  replyRunRegistry,
-} from "../reply-run-registry.js";
+import { ReplyRunAlreadyActiveError, replyRunRegistry } from "../reply-run-registry.js";
 import { isRoutableChannel } from "../route-reply.js";
 import { FOLLOWUP_QUEUES } from "./state.js";
 import type { FollowupRun } from "./types.js";
@@ -86,7 +83,13 @@ type OriginRoutingMetadata = Pick<
 >;
 
 function resolveCollectAnchorMessageId(items: FollowupRun[]): string | undefined {
-  return items.find((item) => item.anchorMessageId?.trim())?.anchorMessageId;
+  for (let index = items.length - 1; index >= 0; index--) {
+    const anchor = items[index]?.anchorMessageId?.trim();
+    if (anchor) {
+      return anchor;
+    }
+  }
+  return undefined;
 }
 
 function resolveOriginRoutingMetadata(items: FollowupRun[]): OriginRoutingMetadata {

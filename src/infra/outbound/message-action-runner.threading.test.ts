@@ -186,6 +186,28 @@ describe("message action threading helpers", () => {
     expect(actionParams.replyTo).toBe("msg-42");
   });
 
+  it("resolves ref=current sends to the current inbound message id", () => {
+    const actionParams: Record<string, unknown> = {
+      channel: "workspace",
+      target: "channel:C123",
+      ref: "current",
+      message: "hi",
+    };
+
+    const resolved = resolveAndApplyOutboundReplyToId(actionParams, {
+      channel: "workspace",
+      toolContext: {
+        currentChannelId: "channel:C123",
+        currentChannelProvider: "workspace",
+        currentMessageId: "msg-100",
+        replyToMode: "all",
+      },
+    });
+
+    expect(resolved).toBe("msg-100");
+    expect(actionParams.replyTo).toBe("msg-100");
+  });
+
   it("skips inherited reply threading for batched mode", () => {
     const actionParams: Record<string, unknown> = {
       channel: "workspace",

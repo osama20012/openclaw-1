@@ -200,6 +200,25 @@ function buildGatewayDeliveryPayload(params: {
   return payload;
 }
 
+function assertGatewayDeliveredMessageId(params: {
+  channel: string;
+  outbound?: { requireDeliveredMessageId?: boolean };
+  result: { messageId?: unknown };
+  to: string;
+}): void {
+  if (params.outbound?.requireDeliveredMessageId !== true) {
+    return;
+  }
+  const messageId =
+    typeof params.result.messageId === "string" ? params.result.messageId.trim() : "";
+  if (messageId) {
+    return;
+  }
+  throw new Error(
+    `Gateway delivery failed: empty outgoing messageId for channel=${params.channel} to=${params.to}`,
+  );
+}
+
 function cacheGatewayDedupeSuccess(params: {
   context: GatewayRequestContext;
   dedupeKey: string;
@@ -557,6 +576,12 @@ export const sendHandlers: GatewayRequestHandlers = {
         if (!result) {
           throw new Error("No delivery result");
         }
+        assertGatewayDeliveredMessageId({
+          channel,
+          outbound: plugin.outbound,
+          result,
+          to: deliveryTarget,
+        });
         const payload = buildGatewayDeliveryPayload({ runId: idem, channel, result });
         return createGatewayInflightSuccess({ context, dedupeKey, payload, channel });
       } catch (err) {
@@ -588,6 +613,7 @@ export const sendHandlers: GatewayRequestHandlers = {
       durationHours?: number;
       silent?: boolean;
       isAnonymous?: boolean;
+      replyToId?: string;
       threadId?: string;
       channel?: string;
       accountId?: string;
@@ -644,6 +670,7 @@ export const sendHandlers: GatewayRequestHandlers = {
       durationHours: request.durationHours,
     };
     const threadId = normalizeOptionalString(request.threadId);
+    const replyToId = normalizeOptionalString(request.replyToId);
     const accountId = normalizeOptionalString(request.accountId);
     try {
       if (!outbound?.sendPoll) {
@@ -672,11 +699,13 @@ export const sendHandlers: GatewayRequestHandlers = {
         to: resolvedTarget.to,
         poll: normalized,
         accountId,
+        replyToId,
         threadId,
         silent: request.silent,
         isAnonymous: request.isAnonymous,
         gatewayClientScopes: client?.connect?.scopes ?? [],
       });
+      assertGatewayDeliveredMessageId({ channel, outbound, result, to: resolvedTarget.to });
       const payload = buildGatewayDeliveryPayload({ runId: idem, channel, result });
       cacheGatewayDedupeSuccess({
         context,

@@ -100,6 +100,7 @@ async function runPollAction(params: {
         resolveCorePoll?: () => {
           durationHours?: number;
           maxSelections?: number;
+          replyToId?: string;
           threadId?: string;
         };
         ctx?: { params?: Record<string, unknown> };
@@ -177,6 +178,27 @@ describe("runMessageAction poll handling", () => {
     expect(call?.durationHours).toBe(2);
     expect(call?.threadId).toBe("42");
     expect(call?.ctx?.params?.threadId).toBe("42");
+  });
+
+  it("resolves current message id as poll reply anchor for same-target sends", async () => {
+    const call = await runPollAction({
+      cfg: pollerConfig,
+      actionParams: {
+        channel: "poller",
+        target: "poller:123",
+        pollQuestion: "Lunch?",
+        pollOption: ["Pizza", "Sushi"],
+      },
+      toolContext: {
+        currentChannelId: "poller:123",
+        currentChannelProvider: "poller",
+        currentMessageId: "100",
+        replyToMode: "all",
+      },
+    });
+
+    expect(call?.replyToId).toBe("100");
+    expect(call?.ctx?.params?.replyTo).toBe("100");
   });
 
   it("expands maxSelections when pollMulti is enabled", async () => {

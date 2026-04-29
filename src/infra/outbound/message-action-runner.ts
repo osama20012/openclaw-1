@@ -730,6 +730,10 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
     toolContext: input.toolContext,
     resolveAutoThreadId: getChannelPlugin(channel)?.threading?.resolveAutoThreadId,
   });
+  const replyToId = resolveAndApplyOutboundReplyToId(params, {
+    channel,
+    toolContext: input.toolContext,
+  });
 
   const base = typeof params.message === "string" ? params.message : "";
   await maybeApplyCrossContextMarker({
@@ -804,6 +808,7 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
         options,
         maxSelections: resolvePollMaxSelections(options.length, allowMultiselect),
         durationHours: durationHours ?? undefined,
+        replyToId: replyToId ?? undefined,
         threadId: resolvedThreadId ?? undefined,
       };
     },

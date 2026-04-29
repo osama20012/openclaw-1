@@ -624,6 +624,42 @@ describe("deliverOutboundPayloads", () => {
     ).toEqual([undefined, "payload-reply"]);
   });
 
+  it("fails required-delivery-id adapters when sendText returns an empty message id", async () => {
+    const sendText = vi.fn().mockResolvedValue({
+      channel: "matrix" as const,
+      messageId: "",
+      roomId: "!room",
+    });
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "matrix",
+          source: "test",
+          plugin: createOutboundTestPlugin({
+            id: "matrix",
+            outbound: {
+              deliveryMode: "direct",
+              requireDeliveredMessageId: true,
+              sendText,
+            },
+          }),
+        },
+      ]),
+    );
+
+    await expect(
+      deliverOutboundPayloads({
+        cfg: {},
+        channel: "matrix",
+        to: "!room",
+        payloads: [{ text: "hello" }],
+        session: { key: "session-1" },
+      }),
+    ).rejects.toThrow(
+      "Outbound delivery failed: empty outgoing messageId for channel=matrix to=!room session=session-1",
+    );
+  });
+
   it("does not let explicit payload replies consume the implicit single-use reply slot", async () => {
     hookMocks.runner.hasHooks.mockImplementation(
       (hookName?: string) => hookName === "message_sending",

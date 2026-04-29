@@ -102,6 +102,7 @@ type MessagePollParams = {
   durationHours?: number;
   channel?: string;
   accountId?: string;
+  replyToId?: string;
   threadId?: string;
   silent?: boolean;
   isAnonymous?: boolean;
@@ -392,6 +393,7 @@ export async function sendPoll(params: MessagePollParams): Promise<MessagePollRe
       maxSelections: normalized.maxSelections,
       durationSeconds: normalized.durationSeconds,
       durationHours: normalized.durationHours,
+      replyToId: params.replyToId,
       threadId: params.threadId,
       silent: params.silent,
       isAnonymous: params.isAnonymous,

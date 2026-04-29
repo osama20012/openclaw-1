@@ -87,6 +87,7 @@ type ChannelHandler = {
   chunker: ChannelOutboundAdapter["chunker"] | null;
   chunkerMode?: "text" | "markdown";
   textChunkLimit?: number;
+  requireDeliveredMessageId?: boolean;
   supportsMedia: boolean;
   sanitizeText?: (payload: ReplyPayload) => string;
   normalizePayload?: (payload: ReplyPayload) => ReplyPayload | null;
@@ -221,6 +222,7 @@ function createPluginHandler(
     chunker,
     chunkerMode,
     textChunkLimit: outbound.textChunkLimit,
+    requireDeliveredMessageId: outbound.requireDeliveredMessageId === true,
     supportsMedia: Boolean(sendMedia),
     sanitizeText: outbound.sanitizeText
       ? (payload) => outbound.sanitizeText!({ text: payload.text ?? "", payload })
@@ -320,6 +322,26 @@ function createPluginHandler(
       });
     },
   };
+}
+
+function assertDeliveredMessageId(params: {
+  handler: ChannelHandler;
+  result: OutboundDeliveryResult;
+  target: ChannelOutboundTargetRef;
+  sessionKey?: string;
+}): void {
+  if (!params.handler.requireDeliveredMessageId) {
+    return;
+  }
+  const messageId =
+    typeof params.result.messageId === "string" ? params.result.messageId.trim() : "";
+  if (messageId) {
+    return;
+  }
+  throw new Error(
+    `Outbound delivery failed: empty outgoing messageId for channel=${params.target.channel} to=${params.target.to}` +
+      `${params.sessionKey ? ` session=${params.sessionKey}` : ""}`,
+  );
 }
 
 function createChannelOutboundContextBase(
@@ -942,7 +964,14 @@ async function deliverOutboundPayloadsCore(
         continue;
       }
       throwIfAborted(abortSignal);
-      results.push(await handler.sendText(unit.text, unit.overrides));
+      const delivery = await handler.sendText(unit.text, unit.overrides);
+      assertDeliveredMessageId({
+        handler,
+        result: delivery,
+        target: handler.buildTargetRef({ threadId: unit.overrides.threadId }),
+        sessionKey: diagnosticSessionKey,
+      });
+      results.push(delivery);
     }
   };
   const normalizedPayloads = normalizePayloadsForChannelDelivery(outboundPayloadPlan, handler);
@@ -1074,6 +1103,12 @@ async function deliverOutboundPayloadsCore(
           effectivePayload,
           applySendReplyToConsumption(sendOverrides),
         );
+        assertDeliveredMessageId({
+          handler,
+          result: delivery,
+          target: deliveryTarget,
+          sessionKey: diagnosticSessionKey,
+        });
         results.push(delivery);
         await maybePinDeliveredMessage({
           handler,
@@ -1098,12 +1133,19 @@ async function deliverOutboundPayloadsCore(
       if (payloadSummary.mediaUrls.length === 0) {
         const beforeCount = results.length;
         if (handler.sendFormattedText) {
-          results.push(
-            ...(await handler.sendFormattedText(
-              payloadSummary.text,
-              applySendReplyToConsumption(sendOverrides),
-            )),
+          const deliveries = await handler.sendFormattedText(
+            payloadSummary.text,
+            applySendReplyToConsumption(sendOverrides),
           );
+          for (const delivery of deliveries) {
+            assertDeliveredMessageId({
+              handler,
+              result: delivery,
+              target: deliveryTarget,
+              sessionKey: diagnosticSessionKey,
+            });
+          }
+          results.push(...deliveries);
         } else {
           await sendTextChunks(payloadSummary.text, sendOverrides);
         }
@@ -1189,6 +1231,12 @@ async function deliverOutboundPayloadsCore(
         const delivery = handler.sendFormattedMedia
           ? await handler.sendFormattedMedia(unit.caption ?? "", unit.mediaUrl, unit.overrides)
           : await handler.sendMedia(unit.caption ?? "", unit.mediaUrl, unit.overrides);
+        assertDeliveredMessageId({
+          handler,
+          result: delivery,
+          target: deliveryTarget,
+          sessionKey: diagnosticSessionKey,
+        });
         results.push(delivery);
         firstMessageId ??= delivery.messageId;
         lastMessageId = delivery.messageId;

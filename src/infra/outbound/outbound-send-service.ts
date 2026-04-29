@@ -210,6 +210,7 @@ export async function executePollAction(params: {
     maxSelections: number;
     durationSeconds?: number;
     durationHours?: number;
+    replyToId?: string;
     threadId?: string;
     isAnonymous?: boolean;
   };
@@ -236,6 +237,7 @@ export async function executePollAction(params: {
     maxSelections: corePoll.maxSelections,
     durationSeconds: corePoll.durationSeconds ?? undefined,
     durationHours: corePoll.durationHours ?? undefined,
+    replyToId: corePoll.replyToId ?? undefined,
     channel: params.ctx.channel,
     accountId: params.ctx.accountId ?? undefined,
     threadId: corePoll.threadId ?? undefined,
