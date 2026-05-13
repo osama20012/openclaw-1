@@ -16,5 +16,17 @@ function escapeForCmdExe(arg) {
 }
 
 export function buildCmdExeCommandLine(command, args) {
-  return [escapeForCmdExe(command), ...args.map(escapeForCmdExe)].join(" ");
+  const escapedCommand = escapeForCmdExe(command);
+  const commandLine = [escapedCommand, ...args.map(escapeForCmdExe)].join(" ");
+
+  // cmd.exe /s /c has special quote-stripping rules. When the executable path
+  // itself is quoted, e.g. C:\Program Files\nodejs\pnpm.CMD, passing only
+  // "C:\Program Files\nodejs\pnpm.CMD" run build lets cmd.exe strip the command
+  // quotes and attempt to execute C:\Program. Wrap the whole command line so the
+  // quoted executable remains intact: ""C:\Program Files\nodejs\pnpm.CMD" run build".
+  if (escapedCommand.startsWith('"')) {
+    return `"${commandLine}"`;
+  }
+
+  return commandLine;
 }
