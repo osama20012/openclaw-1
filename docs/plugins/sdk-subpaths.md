@@ -41,6 +41,13 @@ but new code should not add imports from them: `agent-runtime-test-contracts`,
 `text-runtime`, and `zod`. Import `zod` directly from `zod` in new plugin code.
 `plugin-test-runtime` is still an active focused test helper subpath.
 
+### Reserved bundled plugin helper subpaths
+
+These subpaths are plugin-owned compatibility surfaces reserved for their owning
+bundled plugin, not general SDK APIs: `plugin-sdk/codex-mcp-projection` and
+`plugin-sdk/codex-native-task-runtime`. Cross-owner extension imports are blocked
+by package contract guardrails.
+
 ### Deprecated unused public subpaths
 
 These public subpaths existed for at least one month and currently have no
@@ -215,6 +222,8 @@ focused channel/runtime subpaths, `config-contracts`, `string-coerce-runtime`,
     | `plugin-sdk/runtime` | Broad runtime/logging/backup/plugin-install helpers |
     | `plugin-sdk/runtime-env` | Narrow runtime env, logger, timeout, retry, and backoff helpers |
     | `plugin-sdk/browser-config` | Supported browser config facade for normalized profile/defaults, CDP URL parsing, and browser-control auth helpers |
+    | `plugin-sdk/codex-mcp-projection` | Reserved bundled Codex helper for projecting user MCP server config into Codex thread config; not for third-party plugins |
+    | `plugin-sdk/codex-native-task-runtime` | Reserved bundled Codex helper for native task mirror/runtime wiring; not for third-party plugins |
     | `plugin-sdk/channel-runtime-context` | Generic channel runtime-context registration and lookup helpers |
     | `plugin-sdk/matrix` | Deprecated Matrix compatibility facade for older third-party channel packages; new plugins should import `plugin-sdk/run-command` directly |
     | `plugin-sdk/mattermost` | Deprecated Mattermost compatibility facade for older third-party channel packages; new plugins should import generic SDK subpaths directly |
@@ -224,6 +233,7 @@ focused channel/runtime subpaths, `config-contracts`, `string-coerce-runtime`,
     | `plugin-sdk/lazy-runtime` | Lazy runtime import/binding helpers such as `createLazyRuntimeModule`, `createLazyRuntimeMethod`, and `createLazyRuntimeSurface` |
     | `plugin-sdk/process-runtime` | Process exec helpers |
     | `plugin-sdk/cli-runtime` | CLI formatting, wait, version, argument-invocation, and lazy command-group helpers |
+    | `plugin-sdk/gateway-method-runtime` | Reserved Gateway method dispatch helper for plugin HTTP routes that declare `contracts.gatewayMethodDispatch: ["authenticated-request"]` |
     | `plugin-sdk/gateway-runtime` | Gateway client, event-loop-ready client start helper, gateway CLI RPC, gateway protocol errors, and channel-status patch helpers |
     | `plugin-sdk/config-contracts` | Focused type-only config surface for plugin config shapes such as `OpenClawConfig` and channel/provider config types |
     | `plugin-sdk/plugin-config-runtime` | Runtime plugin-config lookup helpers such as `requireRuntimeConfig`, `resolvePluginConfigObject`, and `resolveLivePluginConfigObject` |
@@ -361,10 +371,18 @@ focused channel/runtime subpaths, `config-contracts`, `string-coerce-runtime`,
   </Accordion>
 
   <Accordion title="Reserved bundled-helper subpaths">
-    There are currently no reserved bundled-helper SDK subpaths. Owner-specific
-    helpers live inside the owning plugin package, while reusable host contracts
-    use generic SDK subpaths such as `plugin-sdk/gateway-runtime`,
-    `plugin-sdk/security-runtime`, and `plugin-sdk/plugin-config-runtime`.
+    Reserved bundled-helper SDK subpaths are narrow owner-specific surfaces for
+    bundled plugin code. They are tracked in the SDK inventory so package
+    builds and aliasing stay deterministic, but they are not general plugin
+    authoring APIs. New reusable host contracts should use generic SDK subpaths
+    such as `plugin-sdk/gateway-runtime`, `plugin-sdk/security-runtime`, and
+    `plugin-sdk/plugin-config-runtime`.
+
+    | Subpath | Owner and purpose |
+    | --- | --- |
+    | `plugin-sdk/codex-mcp-projection` | Bundled Codex plugin helper for projecting user MCP server config into Codex app-server thread config |
+    | `plugin-sdk/codex-native-task-runtime` | Bundled Codex plugin helper for mirroring Codex app-server native subagents into OpenClaw task state |
+
   </Accordion>
 </AccordionGroup>
 
