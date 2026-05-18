@@ -48,8 +48,10 @@ export function createDiscordDraftPreviewController(params: {
   const accountBlockStreamingEnabled =
     resolveChannelStreamingBlockEnabled(params.discordConfig) ??
     params.cfg.agents?.defaults?.blockStreamingDefault === "on";
+  const canStreamProgressDraftForToolOnlySource =
+    params.sourceRepliesAreToolOnly && discordStreamMode === "progress";
   const canStreamDraft =
-    !params.sourceRepliesAreToolOnly &&
+    (!params.sourceRepliesAreToolOnly || canStreamProgressDraftForToolOnlySource) &&
     discordStreamMode !== "off" &&
     !accountBlockStreamingEnabled;
   const draftStream = canStreamDraft
@@ -59,6 +61,7 @@ export function createDiscordDraftPreviewController(params: {
         maxChars: draftMaxChars,
         replyToMessageId: () => params.replyReference.peek(),
         minInitialChars: discordStreamMode === "progress" ? 0 : 30,
+        suppressEmbeds: params.discordConfig?.suppressEmbeds ?? true,
         throttleMs: 1200,
         log: params.log,
         warn: params.log,

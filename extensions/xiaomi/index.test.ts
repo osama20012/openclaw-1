@@ -70,7 +70,7 @@ const readTool = {
 };
 
 function mimoReasoningModel(
-  id: "mimo-v2-pro" | "mimo-v2-omni" | "mimo-v2.5" | "mimo-v2.5-pro",
+  id: "mimo-v2-pro" | "mimo-v2-omni" | "mimo-v2.5" | "mimo-v2.5-pro" | "mimo-v2.6-pro",
 ): OpenAICompletionsModel {
   return {
     provider: "xiaomi",
@@ -242,12 +242,34 @@ describe("xiaomi provider plugin", () => {
     expect(replayPolicy?.validateAnthropicTurns).toBe(true);
   });
 
+  it("marks resolved MiMo models for empty array items omission", async () => {
+    const provider = await registerSingleProviderPlugin(xiaomiPlugin);
+    const model = mimoReasoningModel("mimo-v2.5");
+
+    const normalized = provider.normalizeResolvedModel?.({
+      provider: "xiaomi",
+      modelId: model.id,
+      modelApi: model.api,
+      model,
+    } as never);
+
+    expect(
+      (normalized?.compat as { omitEmptyArrayItems?: unknown } | undefined)?.omitEmptyArrayItems,
+    ).toBe(true);
+  });
+
   it("advertises thinking profiles for MiMo reasoning models only", async () => {
     const provider = await registerSingleProviderPlugin(xiaomiPlugin);
     const resolveThinkingProfile = requireThinkingProfileResolver(provider);
     const expectedLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-    for (const modelId of ["mimo-v2-pro", "mimo-v2-omni", "mimo-v2.5", "mimo-v2.5-pro"]) {
+    for (const modelId of [
+      "mimo-v2-pro",
+      "mimo-v2-omni",
+      "mimo-v2.5",
+      "mimo-v2.5-pro",
+      "mimo-v2.6-pro",
+    ]) {
       const profile = resolveThinkingProfile({ provider: "xiaomi", modelId } as never);
       expect(profile?.levels.map((l) => l.id)).toEqual(expectedLevels);
       expect(profile?.defaultLevel).toBe("high");
@@ -263,6 +285,9 @@ describe("xiaomi provider plugin", () => {
 
     expect(
       provider.isModernModelRef?.({ provider: "xiaomi", modelId: "mimo-v2.5-pro" } as never),
+    ).toBe(true);
+    expect(
+      provider.isModernModelRef?.({ provider: "xiaomi", modelId: "mimo-v2.6-pro" } as never),
     ).toBe(true);
     expect(
       provider.isModernModelRef?.({ provider: "xiaomi", modelId: "mimo-v2-pro" } as never),

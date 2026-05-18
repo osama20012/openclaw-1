@@ -99,6 +99,9 @@ import {
 } from "../../protocol/index.js";
 import {
   gatewayStartupUnavailableDetails,
+  GATEWAY_STARTUP_CLOSE_CODE,
+  GATEWAY_STARTUP_CLOSE_REASON,
+  GATEWAY_STARTUP_PENDING_CLOSE_CAUSE,
   GATEWAY_STARTUP_RETRY_AFTER_MS,
 } from "../../protocol/startup-unavailable.js";
 import { parseGatewayRole } from "../../role-policy.js";
@@ -183,6 +186,7 @@ function resolvePinnedClientMetadata(params: {
   deviceFamilyMismatch: boolean;
   pinnedPlatform?: string;
   pinnedDeviceFamily?: string;
+  refreshPairedPlatform?: string;
 } {
   function normalizeLegacyNodeHostPlatformPin(value: string): string {
     switch (value) {
@@ -195,6 +199,16 @@ function resolvePinnedClientMetadata(params: {
       default:
         return value;
     }
+  }
+
+  function normalizeMobileAppPlatformPin(clientId: string | undefined, value: string): string {
+    if (clientId === GATEWAY_CLIENT_IDS.IOS_APP && /^(?:ios|ipados)(?:\s|$)/.test(value)) {
+      return "ios-family";
+    }
+    if (clientId === GATEWAY_CLIENT_IDS.ANDROID_APP && /^android(?:\s|$)/.test(value)) {
+      return "android";
+    }
+    return value;
   }
 
   const claimedPlatform = normalizeDeviceMetadataForAuth(params.claimedPlatform);
@@ -210,15 +224,32 @@ function resolvePinnedClientMetadata(params: {
     claimedPlatform !== "" &&
     normalizeLegacyNodeHostPlatformPin(claimedPlatform) ===
       normalizeLegacyNodeHostPlatformPin(pairedPlatform);
+  const isMobileAppPlatformVersionRefresh =
+    hasPinnedPlatform &&
+    claimedPlatform !== "" &&
+    claimedPlatform !== pairedPlatform &&
+    normalizeMobileAppPlatformPin(params.clientId, claimedPlatform) ===
+      normalizeMobileAppPlatformPin(params.clientId, pairedPlatform);
   const platformMismatch =
-    hasPinnedPlatform && claimedPlatform !== pairedPlatform && !isLegacyNodeHostPlatformPin;
+    hasPinnedPlatform &&
+    claimedPlatform !== pairedPlatform &&
+    !isLegacyNodeHostPlatformPin &&
+    !isMobileAppPlatformVersionRefresh;
   const deviceFamilyMismatch = hasPinnedDeviceFamily && claimedDeviceFamily !== pairedDeviceFamily;
+  const pinnedPlatform =
+    claimedPlatform === pairedPlatform
+      ? params.pairedPlatform
+      : isLegacyNodeHostPlatformPin
+        ? normalizeLegacyNodeHostPlatformPin(pairedPlatform)
+        : isMobileAppPlatformVersionRefresh
+          ? params.claimedPlatform
+          : undefined;
   return {
     platformMismatch,
     deviceFamilyMismatch,
-    pinnedPlatform:
-      hasPinnedPlatform && claimedPlatform === pairedPlatform ? params.pairedPlatform : undefined,
+    pinnedPlatform: hasPinnedPlatform ? pinnedPlatform : undefined,
     pinnedDeviceFamily: hasPinnedDeviceFamily ? params.pairedDeviceFamily : undefined,
+    ...(isMobileAppPlatformVersionRefresh ? { refreshPairedPlatform: params.claimedPlatform } : {}),
   };
 }
 
@@ -509,7 +540,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         };
 
         if (isStartupPending?.()) {
-          markHandshakeFailure("startup-sidecars-pending");
+          markHandshakeFailure(GATEWAY_STARTUP_PENDING_CLOSE_CAUSE);
           await sendFrame({
             type: "res",
             id: frame.id,
@@ -520,7 +551,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
               details: gatewayStartupUnavailableDetails(),
             }),
           }).catch(() => {});
-          queueMicrotask(() => close(1013, "gateway starting"));
+          queueMicrotask(() => close(GATEWAY_STARTUP_CLOSE_CODE, GATEWAY_STARTUP_CLOSE_REASON));
           return;
         }
 
@@ -540,10 +571,13 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
             minimumProbeProtocol: MIN_PROBE_PROTOCOL_VERSION,
           });
           logWsControl.warn(
-            `protocol mismatch conn=${connId} remote=${remoteAddr ?? "?"} client=${clientLabel} ${connectParams.client.mode} v${connectParams.client.version}`,
+            `protocol mismatch conn=${connId} peer=${formatForLog(peerLabel)} remote=${remoteAddr ?? "?"} remotePort=${remotePort ?? "?"} client=${formatForLog(clientLabel)} ${connectParams.client.mode} v${formatForLog(connectParams.client.version)} min=${minProtocol} max=${maxProtocol} expected=${PROTOCOL_VERSION} probeMin=${MIN_PROBE_PROTOCOL_VERSION} instance=${formatForLog(connectParams.client.instanceId ?? "n/a")}`,
           );
           sendHandshakeErrorResponse(ErrorCodes.INVALID_REQUEST, "protocol mismatch", {
             details: {
+              code: ConnectErrorDetailCodes.PROTOCOL_MISMATCH,
+              clientMinProtocol: minProtocol,
+              clientMaxProtocol: maxProtocol,
               expectedProtocol: PROTOCOL_VERSION,
               minimumProbeProtocol: MIN_PROBE_PROTOCOL_VERSION,
             },
@@ -1273,9 +1307,15 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
               }
             }
 
-            // Metadata pinning is approval-bound. Reconnects can update access metadata,
-            // but platform/device family must stay on the approved pairing record.
-            await updatePairedDeviceMetadata(device.id, clientAccessMetadata);
+            // Metadata pinning is approval-bound. Reconnects can update access metadata
+            // and same-family mobile OS version labels, but real platform/device-family
+            // changes must stay on the approved pairing record.
+            await updatePairedDeviceMetadata(device.id, {
+              ...clientAccessMetadata,
+              ...(metadataPinning.refreshPairedPlatform
+                ? { platform: metadataPinning.refreshPairedPlatform }
+                : {}),
+            });
           }
         }
 
@@ -1712,8 +1752,13 @@ function getRawDataByteLength(data: unknown): number {
 }
 
 function setSocketMaxPayload(socket: WebSocket, maxPayload: number): void {
-  const receiver = (socket as { _receiver?: { _maxPayload?: number } })._receiver;
+  const receiver = (socket as { _receiver?: { _maxPayload?: number } })["_receiver"];
   if (receiver) {
-    receiver._maxPayload = maxPayload;
+    receiver["_maxPayload"] = maxPayload;
   }
 }
+
+export const testing = {
+  resolvePinnedClientMetadata,
+};
+export { testing as __testing };

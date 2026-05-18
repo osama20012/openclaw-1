@@ -3,7 +3,7 @@ import {
   clearHistoryEntriesIfEnabled,
   recordPendingHistoryEntryWithMedia,
 } from "../../auto-reply/reply/history.js";
-import type { HistoryMediaEntry } from "../../auto-reply/reply/history.types.js";
+import { toHistoryMediaEntries } from "../inbound-event/media.js";
 import { createChannelReplyPipeline } from "../message/reply-pipeline.js";
 import type { CreateChannelReplyPipelineParams } from "../message/reply-pipeline.js";
 import { recordChannelBotPairLoopAndCheckSuppression } from "./bot-loop-protection.js";
@@ -13,8 +13,11 @@ import {
   isDurableInboundReplyDeliveryHandled,
   throwIfDurableInboundReplyDeliveryFailed,
 } from "./durable-delivery.js";
-export { buildChannelTurnContext, filterChannelTurnSupplementalContext } from "./context.js";
-export type { BuildChannelTurnContextParams } from "./context.js";
+export {
+  buildChannelInboundEventContext,
+  filterChannelInboundSupplementalContext,
+} from "../inbound-event/context.js";
+export type { BuildChannelInboundEventContextParams } from "../inbound-event/context.js";
 export {
   clearChannelBotPairLoopGuardForTests,
   listTrackedChannelBotPairsForTests,
@@ -38,13 +41,12 @@ import type {
   AssembledChannelTurn,
   ChannelEventClass,
   ChannelTurnAdmission,
-  ChannelTurnDeliveryAdapter,
+  ChannelEventDeliveryAdapter,
   ChannelTurnHistoryFinalizeOptions,
   ChannelTurnLogEvent,
   ChannelTurnResolved,
   ChannelTurnResult,
   DispatchedChannelTurnResult,
-  InboundMediaFacts,
   NormalizedTurnInput,
   PreparedChannelTurn,
   PreflightFacts,
@@ -68,7 +70,7 @@ export type {
   ChannelEventClass,
   ChannelTurnAdapter,
   ChannelTurnAdmission,
-  ChannelTurnDeliveryAdapter,
+  ChannelEventDeliveryAdapter,
   ChannelTurnDroppedHistoryOptions,
   ChannelTurnHistoryFinalizeOptions,
   ChannelTurnDispatcherOptions,
@@ -79,7 +81,6 @@ export type {
   ChannelTurnResult,
   DispatchedChannelTurnResult,
   ConversationFacts,
-  InboundMediaFacts,
   MessageFacts,
   NormalizedTurnInput,
   PreflightFacts,
@@ -91,6 +92,7 @@ export type {
   SenderFacts,
   SupplementalContextFacts,
 } from "./types.js";
+export type { InboundMediaFacts } from "./types.js";
 
 const DEFAULT_EVENT_CLASS: ChannelEventClass = {
   kind: "message",
@@ -142,7 +144,7 @@ function emit(params: {
   });
 }
 
-export function createNoopChannelTurnDeliveryAdapter(): ChannelTurnDeliveryAdapter {
+export function createNoopChannelEventDeliveryAdapter(): ChannelEventDeliveryAdapter {
   return {
     deliver: async () => ({
       visibleReplySent: false,
@@ -159,22 +161,6 @@ function clearPendingHistoryAfterTurn(params?: ChannelTurnHistoryFinalizeOptions
     historyKey: params.historyKey,
     limit: params.limit,
   });
-}
-
-function historyMediaFromInboundFacts(
-  media: readonly InboundMediaFacts[] | readonly HistoryMediaEntry[] | null | undefined,
-  messageId: string,
-): HistoryMediaEntry[] {
-  if (!Array.isArray(media)) {
-    return [];
-  }
-  return media.map((entry) => ({
-    path: entry.path,
-    url: entry.url,
-    contentType: entry.contentType,
-    kind: entry.kind,
-    messageId: entry.messageId ?? messageId,
-  }));
 }
 
 function resolveDroppedHistorySender(input: NormalizedTurnInput, preflight: PreflightFacts) {
@@ -235,8 +221,8 @@ export async function recordDroppedChannelTurnHistory(params: {
     shouldRecord: history.shouldRecord,
     media:
       typeof media === "function"
-        ? async () => historyMediaFromInboundFacts(await media(), params.input.id)
-        : historyMediaFromInboundFacts(media, params.input.id),
+        ? async () => toHistoryMediaEntries(await media(), { messageId: params.input.id })
+        : toHistoryMediaEntries(media, { messageId: params.input.id }),
   });
 }
 
@@ -420,6 +406,7 @@ async function runPreparedChannelTurnCore<
   const admission = params.admission ?? ({ kind: "dispatch" } as const);
   const botLoopDrop = resolveBotLoopProtectionDrop(params);
   if (botLoopDrop) {
+    clearPendingHistoryAfterTurn(params.history);
     return botLoopDrop;
   }
   emit({
@@ -648,7 +635,7 @@ export async function runChannelTurn<
       admission.kind === "observeOnly"
         ? {
             ...resolved,
-            delivery: createNoopChannelTurnDeliveryAdapter(),
+            delivery: createNoopChannelEventDeliveryAdapter(),
             admission,
             log: params.log,
             messageId: input.id,

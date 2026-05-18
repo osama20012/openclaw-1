@@ -1,7 +1,9 @@
 import {
-  buildChannelTurnContext,
+  buildChannelInboundEventContext,
   formatInboundEnvelope,
   resolveEnvelopeFormatOptions,
+  toHistoryMediaEntries,
+  toInboundMediaFacts,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveChannelContextVisibilityMode } from "openclaw/plugin-sdk/context-visibility-runtime";
 import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/conversation-runtime";
@@ -121,7 +123,6 @@ export async function buildDiscordMessageProcessContext(params: {
     allowNameMatching: isDangerousNameMatchingEnabled(discordConfig),
     isGuild: isGuildMessage,
     channelTopic: channelInfo?.topic,
-    messageBody: text,
   });
   const pinnedMainDmOwner = isDirectMessage
     ? resolvePinnedMainDmOwnerFromAllowlist({
@@ -151,6 +152,7 @@ export async function buildDiscordMessageProcessContext(params: {
     sessionKey: route.sessionKey,
   });
   const channelHistory = createChannelHistoryWindow({ historyMap: guildHistories });
+  const isRoomEvent = ctx.inboundEventKind === "room_event";
   let combinedBody = formatInboundEnvelope({
     channel: "Discord",
     from: fromLabel,
@@ -162,7 +164,8 @@ export async function buildDiscordMessageProcessContext(params: {
     envelope: envelopeOptions,
   });
   const shouldIncludeChannelHistory =
-    !isDirectMessage && !(isGuildMessage && channelConfig?.autoThread && !threadChannel);
+    !isDirectMessage &&
+    (isRoomEvent || !(isGuildMessage && channelConfig?.autoThread && !threadChannel));
   if (shouldIncludeChannelHistory) {
     combinedBody = channelHistory.buildPendingContext({
       historyKey: messageChannelId,
@@ -277,7 +280,7 @@ export async function buildDiscordMessageProcessContext(params: {
     message,
     messageChannelId,
     isGuildMessage,
-    channelConfig,
+    channelConfig: isRoomEvent ? null : channelConfig,
     threadChannel,
     channelType: channelInfo?.type,
     channelName: channelInfo?.name,
@@ -327,7 +330,7 @@ export async function buildDiscordMessageProcessContext(params: {
           sessionKey: effectiveSessionKey,
         });
 
-  const ctxPayload = buildChannelTurnContext({
+  const ctxPayload = buildChannelInboundEventContext({
     channel: "discord",
     provider: "discord",
     surface: "discord",
@@ -369,6 +372,7 @@ export async function buildDiscordMessageProcessContext(params: {
       originatingTo,
     },
     message: {
+      inboundEventKind: ctx.inboundEventKind,
       body: combinedBody,
       rawBody: preflightAudioTranscript ?? baseText,
       bodyForAgent: preflightAudioTranscript ?? baseText ?? text,
@@ -397,11 +401,9 @@ export async function buildDiscordMessageProcessContext(params: {
       authorized: commandAuthorized,
       body: preflightAudioTranscript ?? baseText,
     },
-    media: mediaListForContext.map((media, index) => ({
-      path: media.path,
-      contentType: media.contentType,
-      transcribed: index === preflightAudioIndex,
-    })),
+    media: toInboundMediaFacts(mediaListForContext, {
+      transcribed: (_media, index) => index === preflightAudioIndex,
+    }),
     supplemental: {
       quote: filteredReplyContext
         ? {
@@ -420,11 +422,25 @@ export async function buildDiscordMessageProcessContext(params: {
       ...(preflightAudioTranscript !== undefined ? { Transcript: preflightAudioTranscript } : {}),
       GroupSubject: groupSubject,
       GroupChannel: groupChannel,
-      UntrustedContext: untrustedContext,
+      UntrustedStructuredContext: untrustedContext,
       OwnerAllowFrom: ownerAllowFrom,
     },
   });
   const persistedSessionKey = ctxPayload.SessionKey ?? route.sessionKey;
+  if (isRoomEvent && shouldIncludeChannelHistory) {
+    await channelHistory.recordWithMedia({
+      historyKey: messageChannelId,
+      limit: historyLimit,
+      entry: {
+        sender: senderName,
+        body: text,
+        timestamp: resolveTimestampMs(message.timestamp),
+        messageId: message.id,
+      },
+      media: toHistoryMediaEntries(mediaList, { messageId: message.id }),
+      messageId: message.id,
+    });
+  }
 
   if (shouldLogVerbose()) {
     const preview = truncateUtf16Safe(combinedBody, 200).replace(/\n/g, "\\n");

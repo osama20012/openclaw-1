@@ -6,7 +6,7 @@ import type { AcpInitializeSessionInput } from "../acp/control-plane/manager.typ
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
-  __testing as sessionBindingServiceTesting,
+  testing as sessionBindingServiceTesting,
   registerSessionBindingAdapter,
   type SessionBindingAdapterCapabilities,
   type SessionBindingPlacement,
@@ -2735,6 +2735,15 @@ describe("spawnAcpDirect", () => {
     expect(expectFailedSpawn(result, "error").error).toContain("agent dispatch failed");
     expect(relayHandle.dispose).toHaveBeenCalledTimes(1);
     expect(relayHandle.notifyStarted).not.toHaveBeenCalled();
+    expect(hoisted.cleanupFailedAcpSpawnMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeCloseHandle: expect.objectContaining({
+          handle: expect.objectContaining({
+            backend: "acpx",
+          }),
+        }),
+      }),
+    );
   });
 
   it('rejects streamTo="parent" without requester session context', async () => {

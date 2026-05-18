@@ -2,10 +2,10 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { __testing as extraParamsTesting } from "./pi-embedded-runner/extra-params.js";
+import { testing as extraParamsTesting } from "./pi-embedded-runner/extra-params.js";
 
 vi.mock("../plugins/provider-hook-runtime.js", () => ({
-  __testing: {
+  testing: {
     buildHookProviderCacheKey: () => "test-provider-hook-cache-key",
   },
   prepareProviderExtraParams: () => undefined,
@@ -723,6 +723,31 @@ describe("applyExtraParamsToAgent", () => {
     expect(messages[0]).not.toHaveProperty("reasoning_content");
     expect(messages[1]).toHaveProperty("reasoning_content", "");
     expect(messages[2]).not.toHaveProperty("reasoning_content");
+  });
+
+  it("fills MiMo V2.6 reasoning_content for unowned OpenAI-compatible proxy models", () => {
+    const payload = runResponsesPayloadMutationCase({
+      applyProvider: "opencode",
+      applyModelId: "xiaomi/mimo-v2.6-pro",
+      thinkingLevel: "high",
+      model: {
+        api: "openai-completions",
+        provider: "opencode",
+        id: "xiaomi/mimo-v2.6-pro",
+      } as Model<"openai-completions">,
+      payload: {
+        messages: [
+          { role: "user", content: "continue" },
+          { role: "assistant", content: "I used a tool" },
+          { role: "tool", content: "ok" },
+        ],
+      },
+    });
+
+    const messages = payload.messages as Array<Record<string, unknown>>;
+    expect(payload.thinking).toEqual({ type: "enabled" });
+    expect(payload.reasoning_effort).toBe("high");
+    expect(messages[1]).toHaveProperty("reasoning_content", "");
   });
 
   it("promotes reasoning-only MiMo V2 proxy finals to visible text", async () => {
