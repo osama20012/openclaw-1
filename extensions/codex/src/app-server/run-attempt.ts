@@ -80,6 +80,7 @@ import { ensureCodexComputerUse } from "./computer-use.js";
 import {
   isCodexAppServerApprovalPolicyAllowedByRequirements,
   readCodexPluginConfig,
+  resolveCodexComputerUseConfig,
   resolveCodexPluginsPolicy,
   resolveCodexAppServerRuntimeOptions,
   withMcpElicitationsApprovalPolicy,
@@ -801,11 +802,13 @@ export async function runCodexAppServerAttempt(
   const attemptStartedAt = Date.now();
   const attemptClientFactory = options.clientFactory ?? defaultCodexAppServerClientFactory;
   const pluginConfig = readCodexPluginConfig(options.pluginConfig);
+  const computerUseConfig = resolveCodexComputerUseConfig({ pluginConfig });
   const configuredAppServer = resolveCodexAppServerRuntimeOptions({ pluginConfig });
   const resolvedWorkspace = resolveUserPath(params.workspaceDir);
   await fs.mkdir(resolvedWorkspace, { recursive: true });
   const sandboxSessionKey =
     params.sandboxSessionKey?.trim() || params.sessionKey?.trim() || params.sessionId;
+  const contextSessionKey = params.sessionKey?.trim() || sandboxSessionKey;
   const sandbox = await resolveSandboxContext({
     config: params.config,
     sessionKey: sandboxSessionKey,
@@ -880,7 +883,7 @@ export async function runCodexAppServerAttempt(
       });
   const runtimeParams = {
     ...params,
-    sessionKey: sandboxSessionKey,
+    sessionKey: contextSessionKey,
     ...(startupAuthProfileId ? { authProfileId: startupAuthProfileId } : {}),
   };
   let activeSessionId = params.sessionId;
@@ -998,7 +1001,7 @@ export async function runCodexAppServerAttempt(
       hadSessionFile,
       contextEngine: activeContextEngine,
       sessionId: activeSessionId,
-      sessionKey: sandboxSessionKey,
+      sessionKey: contextSessionKey,
       sessionFile: activeSessionFile,
       runtimeContext: buildActiveContextEngineRuntimeContext(),
       runMaintenance: runHarnessContextEngineMaintenance,
@@ -1012,7 +1015,7 @@ export async function runCodexAppServerAttempt(
     params,
     resolvedWorkspace,
     effectiveWorkspace,
-    sessionKey: sandboxSessionKey,
+    sessionKey: contextSessionKey,
     sessionAgentId,
   });
   const baseDeveloperInstructions = joinPresentSections(
@@ -1045,7 +1048,7 @@ export async function runCodexAppServerAttempt(
     const assembled = await assembleHarnessContextEngine({
       contextEngine: activeContextEngine,
       sessionId: activeSessionId,
-      sessionKey: sandboxSessionKey,
+      sessionKey: contextSessionKey,
       messages: historyMessages,
       tokenBudget: params.contextTokenBudget,
       availableTools: new Set(toolBridge.specs.map((tool) => tool.name).filter(isNonEmptyString)),
@@ -1085,7 +1088,7 @@ export async function runCodexAppServerAttempt(
       : { project: true, reason: "per-turn-projection" };
     embeddedAgentLog.info("codex app-server context-engine projection decision", {
       sessionId: params.sessionId,
-      sessionKey: sandboxSessionKey,
+      sessionKey: contextSessionKey,
       engineId: activeContextEngine.info.id,
       mode: contextEngineProjection?.mode ?? assembled.contextProjection?.mode ?? "per_turn",
       epoch: contextEngineProjection?.epoch,
@@ -1146,7 +1149,7 @@ export async function runCodexAppServerAttempt(
   };
   const systemPromptReport = buildCodexSystemPromptReport({
     attempt: params,
-    sessionKey: sandboxSessionKey,
+    sessionKey: contextSessionKey,
     workspaceDir: effectiveWorkspace,
     developerInstructions: promptBuild.developerInstructions,
     workspaceBootstrapContext,
@@ -1228,13 +1231,16 @@ export async function runCodexAppServerAttempt(
     const resolvedPluginPolicy = pluginThreadConfigRequired
       ? resolveCodexPluginsPolicy(pluginThreadConfigPluginConfig)
       : undefined;
+    const computerUseMcpElicitationDelegationRequired = computerUseConfig.enabled;
+    const mcpElicitationDelegationRequired =
+      resolvedPluginPolicy?.enabled === true || computerUseMcpElicitationDelegationRequired;
     const enabledPluginConfigKeys = resolvedPluginPolicy
       ? resolvedPluginPolicy.pluginPolicies
           .filter((plugin) => plugin.enabled)
           .map((plugin) => plugin.configKey)
           .toSorted()
       : undefined;
-    embeddedAgentLog.info(
+    embeddedAgentLog.debug(
       "codex plugin thread config eligibility",
       buildCodexPluginThreadConfigEligibilityLogData({
         sessionId: params.sessionId,
@@ -1247,13 +1253,12 @@ export async function runCodexAppServerAttempt(
         appServer,
       }),
     );
-    pluginAppServer =
-      resolvedPluginPolicy?.enabled === true
-        ? {
-            ...appServer,
-            approvalPolicy: withMcpElicitationsApprovalPolicy(appServer.approvalPolicy),
-          }
-        : appServer;
+    pluginAppServer = mcpElicitationDelegationRequired
+      ? {
+          ...appServer,
+          approvalPolicy: withMcpElicitationsApprovalPolicy(appServer.approvalPolicy),
+        }
+      : appServer;
     ({ client, thread } = await withCodexStartupTimeout({
       timeoutMs: startupTimeoutMs,
       signal: runAbortController.signal,
@@ -1270,7 +1275,7 @@ export async function runCodexAppServerAttempt(
           startupClientForCleanup = startupClient;
           await ensureCodexComputerUse({
             client: startupClient,
-            pluginConfig: options.pluginConfig,
+            pluginConfig,
             timeoutMs: appServer.requestTimeoutMs,
             signal: runAbortController.signal,
           });
@@ -2041,6 +2046,9 @@ export async function runCodexAppServerAttempt(
           threadId: thread.threadId,
           turnId,
           pluginAppPolicyContext: thread.pluginAppPolicyContext,
+          ...(computerUseConfig.enabled
+            ? { computerUseMcpServerName: computerUseConfig.mcpServerName }
+            : {}),
           signal: runAbortController.signal,
         });
       }
@@ -2247,7 +2255,7 @@ export async function runCodexAppServerAttempt(
       "codex app-server context-engine turn overflowed; forcing context-engine compaction",
       {
         sessionId: activeSessionId,
-        sessionKey: sandboxSessionKey,
+        sessionKey: contextSessionKey,
         threadId: thread.threadId,
         engineId: activeContextEngine.info.id,
         tokenBudget: params.contextTokenBudget,
@@ -2266,7 +2274,7 @@ export async function runCodexAppServerAttempt(
         activeContextEngine,
         {
           sessionId: activeSessionId,
-          sessionKey: sandboxSessionKey,
+          sessionKey: contextSessionKey,
           sessionFile: activeSessionFile,
           tokenBudget: params.contextTokenBudget,
           force: true,
@@ -2284,7 +2292,7 @@ export async function runCodexAppServerAttempt(
       );
       embeddedAgentLog.info("codex app-server context-engine forced compaction result", {
         sessionId: activeSessionId,
-        sessionKey: sandboxSessionKey,
+        sessionKey: contextSessionKey,
         engineId: activeContextEngine.info.id,
         ok: compactResult.ok,
         compacted: compactResult.compacted,
@@ -2300,7 +2308,7 @@ export async function runCodexAppServerAttempt(
       await runHarnessContextEngineMaintenance({
         contextEngine: activeContextEngine,
         sessionId: activeSessionId,
-        sessionKey: sandboxSessionKey,
+        sessionKey: contextSessionKey,
         sessionFile: activeSessionFile,
         reason: "compaction",
         runtimeContext: maintenanceRuntimeContext,
@@ -2310,7 +2318,7 @@ export async function runCodexAppServerAttempt(
     } catch (compactErr) {
       embeddedAgentLog.warn("codex app-server context-engine forced compaction failed", {
         sessionId: params.sessionId,
-        sessionKey: sandboxSessionKey,
+        sessionKey: contextSessionKey,
         engineId: activeContextEngine.info.id,
         error: formatErrorMessage(compactErr),
       });
@@ -2675,7 +2683,7 @@ export async function runCodexAppServerAttempt(
       params,
       agentId: sessionAgentId,
       result,
-      sessionKey: sandboxSessionKey,
+      sessionKey: contextSessionKey,
       threadId: thread.threadId,
       turnId: activeTurnId,
     });
@@ -2708,7 +2716,7 @@ export async function runCodexAppServerAttempt(
         aborted: finalAborted,
         yieldAborted: Boolean(result.yieldDetected),
         sessionIdUsed: activeSessionId,
-        sessionKey: sandboxSessionKey,
+        sessionKey: contextSessionKey,
         sessionFile: activeSessionFile,
         messagesSnapshot: finalMessages,
         prePromptMessageCount,
@@ -3336,7 +3344,6 @@ async function buildDynamicTools(input: DynamicToolBuildParams) {
     senderName: params.senderName,
     senderUsername: params.senderUsername,
     senderE164: params.senderE164,
-    senderIsOwner: params.senderIsOwner,
     allowGatewaySubagentBinding:
       params.allowGatewaySubagentBinding || isForcedPrivateQaCodexRuntime(),
     ...sessionKeys,
@@ -4433,12 +4440,14 @@ function buildCodexBootstrapInjectionStats(params: {
     params.developerInstructionFiles ?? [],
   );
   return params.bootstrapFiles.map((file) => {
-    const pathValue = readNonEmptyString(file.path) ?? file.name;
-    const baseName = getCodexContextFileBasename(pathValue || file.name);
+    const fileName = readNonEmptyString(file.name);
+    const pathValue = readNonEmptyString(file.path) ?? fileName ?? "";
+    const displayName = (fileName ?? getCodexContextFileDisplayBasename(pathValue)) || pathValue;
+    const baseName = getCodexContextFileBasename(pathValue || fileName || "");
     const rawChars = file.missing ? 0 : (file.content ?? "").trimEnd().length;
     const injected =
-      readCodexIndexedContextFileContent(injectedIndex, pathValue, file.name) ??
-      readCodexIndexedContextFileContent(developerInstructionIndex, pathValue, file.name);
+      readCodexIndexedContextFileContent(injectedIndex, pathValue, fileName) ??
+      readCodexIndexedContextFileContent(developerInstructionIndex, pathValue, fileName);
     let injectedChars = injected?.length ?? 0;
     let truncated = !file.missing && injectedChars < rawChars;
     if (injected === undefined) {
@@ -4451,7 +4460,7 @@ function buildCodexBootstrapInjectionStats(params: {
       }
     }
     return {
-      name: file.name,
+      name: displayName,
       path: pathValue,
       missing: file.missing,
       rawChars,
@@ -4486,13 +4495,20 @@ function indexCodexContextFileContent(files: EmbeddedContextFile[]): {
 function readCodexIndexedContextFileContent(
   index: { byPath: Map<string, string>; byBaseName: Map<string, string> },
   pathValue: string,
-  fileName: string,
+  fileName: string | undefined,
 ): string | undefined {
-  return (
-    index.byPath.get(pathValue) ??
-    index.byPath.get(fileName) ??
-    index.byBaseName.get(getCodexContextFileBasename(fileName))
-  );
+  const pathContent = index.byPath.get(pathValue);
+  if (pathContent !== undefined) {
+    return pathContent;
+  }
+  if (fileName) {
+    const nameContent = index.byPath.get(fileName);
+    if (nameContent !== undefined) {
+      return nameContent;
+    }
+  }
+  const baseName = getCodexContextFileBasename(fileName ?? pathValue);
+  return baseName ? index.byBaseName.get(baseName) : undefined;
 }
 
 function readPositiveNumber(value: unknown): number | undefined {
@@ -4696,6 +4712,10 @@ function compareCodexContextFiles(left: EmbeddedContextFile, right: EmbeddedCont
 
 function normalizeCodexContextFilePath(filePath: string): string {
   return filePath.trim().replaceAll("\\", "/").toLowerCase();
+}
+
+function getCodexContextFileDisplayBasename(filePath: string): string {
+  return filePath.trim().replaceAll("\\", "/").split("/").pop()?.trim() ?? "";
 }
 
 function getCodexContextFileBasename(filePath: string): string {
