@@ -1194,6 +1194,62 @@ describe("bridgeCodexAppServerStartOptions", () => {
     }
   });
 
+  it("answers refresh requests with cached OAuth tokens when forced refresh exceeds the local budget", async () => {
+    vi.useFakeTimers();
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-app-server-"));
+    let resolveRefresh:
+      | ((value: {
+          access: string;
+          refresh: string;
+          expires: number;
+          accountId: string;
+        }) => void)
+      | undefined;
+    oauthMocks.refreshOpenAICodexToken.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+    try {
+      upsertAuthProfile({
+        agentDir,
+        profileId: "openai-codex:work",
+        credential: {
+          type: "oauth",
+          provider: "openai-codex",
+          access: "cached-access-token",
+          refresh: "slow-refresh-token",
+          expires: Date.now() + 60_000,
+          accountId: "account-cached",
+          email: "codex@example.test",
+        },
+      });
+
+      const refresh = refreshCodexAppServerAuthTokens({
+        agentDir,
+        authProfileId: "openai-codex:work",
+      });
+      await vi.advanceTimersByTimeAsync(8_000);
+
+      await expect(refresh).resolves.toEqual({
+        accessToken: "cached-access-token",
+        chatgptAccountId: "account-cached",
+        chatgptPlanType: null,
+      });
+      resolveRefresh?.({
+        access: "late-access-token",
+        refresh: "late-refresh-token",
+        expires: Date.now() + 60_000,
+        accountId: "account-late",
+      });
+      expect(oauthMocks.refreshOpenAICodexToken).toHaveBeenCalledWith("slow-refresh-token");
+    } finally {
+      vi.useRealTimers();
+      await fs.rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not persist an expired stale credential before forced token refresh succeeds", async () => {
     const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-app-server-"));
     const currentExpiry = Date.now() + 60_000;

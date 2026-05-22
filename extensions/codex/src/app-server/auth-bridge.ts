@@ -35,6 +35,7 @@ const CODEX_API_KEY_ENV_VAR = "CODEX_API_KEY";
 const OPENAI_API_KEY_ENV_VAR = "OPENAI_API_KEY";
 const CODEX_APP_SERVER_API_KEY_ENV_VARS = [CODEX_API_KEY_ENV_VAR, OPENAI_API_KEY_ENV_VAR];
 const CODEX_APP_SERVER_HOME_ENV_VARS = [CODEX_HOME_ENV_VAR, HOME_ENV_VAR];
+const CODEX_APP_SERVER_AUTH_REFRESH_BUDGET_MS = 8_000;
 
 type AuthProfileOrderConfig = Parameters<typeof resolveAuthProfileOrder>[0]["cfg"];
 
@@ -337,17 +338,94 @@ export async function refreshCodexAppServerAuthTokens(params: {
   authProfileId?: string;
   config?: AuthProfileOrderConfig;
 }): Promise<CodexChatgptAuthTokensRefreshResponse> {
-  const loginParams = await resolveCodexAppServerAuthProfileLoginParamsInternal({
+  const forcedRefresh = resolveCodexAppServerAuthProfileLoginParamsInternal({
     ...params,
     forceOAuthRefresh: true,
   });
-  if (!loginParams || loginParams.type !== "chatgptAuthTokens") {
-    throw new Error("Codex app-server ChatGPT token refresh requires an OAuth auth profile.");
+  try {
+    const loginParams = await withTimeout(
+      forcedRefresh,
+      CODEX_APP_SERVER_AUTH_REFRESH_BUDGET_MS,
+      "Codex app-server ChatGPT token refresh exceeded local budget.",
+    );
+    if (!loginParams || loginParams.type !== "chatgptAuthTokens") {
+      throw new Error("Codex app-server ChatGPT token refresh requires an OAuth auth profile.");
+    }
+    return {
+      accessToken: loginParams.accessToken,
+      chatgptAccountId: loginParams.chatgptAccountId,
+      chatgptPlanType: loginParams.chatgptPlanType ?? null,
+    };
+  } catch (error) {
+    if (!isLocalTimeoutError(error)) {
+      throw error;
+    }
+    forcedRefresh.catch(() => undefined);
+    const cached = resolveCachedCodexAppServerAuthTokens(params);
+    if (cached) {
+      return cached;
+    }
+    throw error;
+  }
+}
+
+class LocalTimeoutError extends Error {}
+
+function isLocalTimeoutError(error: unknown): error is LocalTimeoutError {
+  return error instanceof LocalTimeoutError;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new LocalTimeoutError(message)), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function resolveCachedCodexAppServerAuthTokens(params: {
+  agentDir: string;
+  authProfileId?: string;
+  config?: AuthProfileOrderConfig;
+}): CodexChatgptAuthTokensRefreshResponse | null {
+  const store = ensureCodexAppServerAuthProfileStore({
+    agentDir: params.agentDir,
+    authProfileId: params.authProfileId,
+    config: params.config,
+  });
+  const profileId = resolveCodexAppServerAuthProfileId({
+    authProfileId: params.authProfileId,
+    store,
+    config: params.config,
+  });
+  if (!profileId) {
+    return null;
+  }
+  const credential = store.profiles[profileId];
+  if (
+    !credential ||
+    credential.type !== "oauth" ||
+    !isCodexAppServerAuthProvider(credential.provider, params.config)
+  ) {
+    return null;
+  }
+  const accessToken = credential.access?.trim();
+  if (!accessToken) {
+    return null;
   }
   return {
-    accessToken: loginParams.accessToken,
-    chatgptAccountId: loginParams.chatgptAccountId,
-    chatgptPlanType: loginParams.chatgptPlanType ?? null,
+    accessToken,
+    chatgptAccountId: resolveChatgptAccountId(profileId, credential),
+    chatgptPlanType: resolveChatgptPlanType(credential) ?? null,
   };
 }
 

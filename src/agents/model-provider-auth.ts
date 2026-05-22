@@ -12,7 +12,6 @@ import {
 } from "./agent-scope-config.js";
 import {
   externalCliDiscoveryForProviderAuth,
-  externalCliDiscoveryForProviders,
   ensureAuthProfileStore,
   ensureAuthProfileStoreWithoutExternalProfiles,
   listProfilesForProvider,
@@ -350,14 +349,11 @@ export async function warmCurrentProviderAuthState(
     if (isStaleOrCancelled() || isDeadlineExceeded()) {
       return;
     }
-    // One AuthProfileStore scoped to every candidate provider; without this
-    // the per-provider externalCli discovery rebuilds the store ~N times.
-    const store = ensureAuthProfileStore(agentDir, {
-      config: cfg,
-      externalCli: externalCliDiscoveryForProviders({
-        cfg,
-        providers: providerList,
-      }),
+    // Keep background warm side-effect-free and non-blocking: external CLI
+    // discovery can synchronously stall the gateway long after our warm budget.
+    // Hot-path callers still fall through to full discovery for missing entries.
+    const store = ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
+      allowKeychainPrompt: false,
     });
     const state = new Map<string, boolean>();
     for (const provider of providerList) {
