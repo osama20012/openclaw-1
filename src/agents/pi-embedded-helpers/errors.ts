@@ -478,6 +478,23 @@ function isOAuthRefreshTimeoutMessage(raw: string): boolean {
   return /\boauth refresh call\b.*\bexceeded hard timeout\b/i.test(raw);
 }
 
+function isOpenAICodexProviderId(provider: string | undefined): boolean {
+  return normalizeOptionalLowercaseString(provider) === "openai-codex";
+}
+
+export function isCodexAuthRefreshTimeoutMessage(
+  raw: string,
+  provider?: string,
+): boolean {
+  if (!raw || !isOpenAICodexProviderId(provider)) {
+    return false;
+  }
+  return (
+    /\bauth refresh request timed out after \d+\s*(?:ms|s)\b/i.test(raw) ||
+    /\bchatgpt token refresh\b.*\bexceeded local budget\b/i.test(raw)
+  );
+}
+
 function isOAuthRefreshContentionMessage(raw: string): boolean {
   return (
     /\brefresh_contention\b/i.test(raw) ||
@@ -877,6 +894,9 @@ function classifyFailoverClassificationFromMessage(
   if (isAuthPermanentErrorMessage(raw)) {
     return toReasonClassification("auth_permanent");
   }
+  if (isCodexAuthRefreshTimeoutMessage(raw, provider)) {
+    return toReasonClassification("auth");
+  }
   if (isAuthErrorMessage(raw)) {
     return toReasonClassification("auth");
   }
@@ -958,6 +978,9 @@ export function classifyProviderRuntimeFailureKind(
     return "refresh_contention";
   }
   if (message && isOAuthRefreshTimeoutMessage(message)) {
+    return "refresh_timeout";
+  }
+  if (message && isCodexAuthRefreshTimeoutMessage(message, normalizedSignal.provider)) {
     return "refresh_timeout";
   }
   if (message && isOAuthCallbackTimeoutMessage(message)) {

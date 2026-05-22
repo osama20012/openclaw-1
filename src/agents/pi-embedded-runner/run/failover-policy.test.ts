@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { classifyFailoverReason } from "../../pi-embedded-helpers.js";
 import { mergeRetryFailoverReason, resolveRunFailoverDecision } from "./failover-policy.js";
 
 describe("resolveRunFailoverDecision", () => {
@@ -58,6 +59,44 @@ describe("resolveRunFailoverDecision", () => {
     ).toEqual({
       action: "fallback_model",
       reason: "rate_limit",
+    });
+  });
+
+  it("does not rotate generic prompt timeouts", () => {
+    expect(
+      resolveRunFailoverDecision({
+        stage: "prompt",
+        aborted: false,
+        externalAbort: false,
+        fallbackConfigured: false,
+        failoverFailure: true,
+        failoverReason: "timeout",
+        profileRotated: false,
+      }),
+    ).toEqual({
+      action: "surface_error",
+      reason: "timeout",
+    });
+  });
+
+  it("rotates Codex auth refresh timeouts after auth classification", () => {
+    const failoverReason = classifyFailoverReason("auth refresh request timed out after 10s", {
+      provider: "openai-codex",
+    });
+    expect(failoverReason).toBe("auth");
+    expect(
+      resolveRunFailoverDecision({
+        stage: "prompt",
+        aborted: false,
+        externalAbort: false,
+        fallbackConfigured: true,
+        failoverFailure: true,
+        failoverReason,
+        profileRotated: false,
+      }),
+    ).toEqual({
+      action: "rotate_profile",
+      reason: "auth",
     });
   });
 

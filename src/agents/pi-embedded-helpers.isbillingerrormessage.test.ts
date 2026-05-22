@@ -1497,6 +1497,23 @@ describe("classifyProviderRuntimeFailureKind", () => {
     ).toBe("auth_refresh");
   });
 
+  it("classifies local Codex auth refresh timeouts as auth for profile rotation", () => {
+    const messages = [
+      "auth refresh request timed out after 10s",
+      "ChatGPT token refresh exceeded local budget",
+    ];
+    for (const message of messages) {
+      expect(
+        classifyProviderRuntimeFailureKind({
+          provider: "openai-codex",
+          message,
+        }),
+      ).toBe("refresh_timeout");
+      expect(classifyFailoverReason(message, { provider: "openai-codex" })).toBe("auth");
+      expect(classifyFailoverReason(message, { provider: "openai" })).toBe("timeout");
+    }
+  });
+
   it("classifies wrapped OpenAI Codex callback validation failures distinctly", () => {
     expect(
       classifyProviderRuntimeFailureKind(

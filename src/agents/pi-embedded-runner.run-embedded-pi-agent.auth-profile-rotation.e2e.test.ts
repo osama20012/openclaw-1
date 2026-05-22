@@ -382,6 +382,39 @@ const writeOpenAiCodexAuthStore = async (agentDir: string) => {
   await fs.writeFile(authPath, JSON.stringify(payload));
 };
 
+const writeOpenAiCodexRotationAuthStore = async (agentDir: string) => {
+  const authPath = path.join(agentDir, "auth-profiles.json");
+  const statePath = path.join(agentDir, "auth-state.json");
+  await fs.writeFile(
+    authPath,
+    JSON.stringify({
+      version: 1,
+      profiles: {
+        "openai-codex:p1": {
+          type: "api_key",
+          provider: "openai-codex",
+          key: "sk-codex-one",
+        },
+        "openai-codex:p2": {
+          type: "api_key",
+          provider: "openai-codex",
+          key: "sk-codex-two",
+        },
+      },
+    }),
+  );
+  await fs.writeFile(
+    statePath,
+    JSON.stringify({
+      version: 1,
+      usageStats: {
+        "openai-codex:p1": { lastUsed: 1 },
+        "openai-codex:p2": { lastUsed: 2 },
+      },
+    }),
+  );
+};
+
 const buildCopilotAssistant = (overrides: Partial<AssistantMessage> = {}) =>
   buildAssistant({ provider: "github-copilot", model: copilotModelId, ...overrides });
 
@@ -963,6 +996,53 @@ describe("runEmbeddedPiAgent auth profile rotation", () => {
     expect(typeof usageStats["openai:p1"]?.cooldownUntil).toBe("number");
     expect(computeBackoffMock).not.toHaveBeenCalled();
     expect(sleepWithAbortMock).not.toHaveBeenCalled();
+  });
+
+  it("rotates Codex auth profiles after a local auth refresh timeout", async () => {
+    await withAgentWorkspace(async ({ agentDir, workspaceDir }) => {
+      await writeOpenAiCodexRotationAuthStore(agentDir);
+      runEmbeddedAttemptMock
+        .mockResolvedValueOnce(
+          makeAttempt({
+            promptError: new Error("auth refresh request timed out after 10s"),
+          }),
+        )
+        .mockResolvedValueOnce(
+          makeAttempt({
+            assistantTexts: ["ok"],
+            lastAssistant: buildAssistant({
+              provider: "openai-codex",
+              model: "gpt-5.5",
+              stopReason: "stop",
+              content: [{ type: "text", text: "ok" }],
+            }),
+          }),
+        );
+
+      await runEmbeddedPiAgentInline({
+        sessionId: "session:test",
+        sessionKey: "agent:test:codex-auth-refresh-timeout",
+        sessionFile: path.join(workspaceDir, "session.jsonl"),
+        workspaceDir,
+        agentDir,
+        config: makeConfig(),
+        prompt: "hello",
+        provider: "openai-codex",
+        model: "gpt-5.5",
+        authProfileId: "openai-codex:p1",
+        authProfileIdSource: "auto",
+        timeoutMs: 5_000,
+        runId: "run:codex-auth-refresh-timeout",
+      });
+
+      expect(runEmbeddedAttemptMock).toHaveBeenCalledTimes(2);
+      await vi.waitFor(async () => {
+        const usageStats = await readUsageStats(agentDir);
+        expect(typeof usageStats["openai-codex:p1"]?.cooldownUntil).toBe("number");
+        expect(typeof usageStats["openai-codex:p2"]?.lastUsed).toBe("number");
+        expect(usageStats["openai-codex:p2"]?.lastUsed).not.toBe(2);
+      });
+    });
   });
 
   it("does not wait for prompt failure cooldown marking before retrying", async () => {

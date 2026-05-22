@@ -2383,6 +2383,11 @@ export async function runEmbeddedPiAgent(
               continue;
             }
             if (promptFailoverDecision.action === "rotate_profile") {
+              log.warn(
+                `auth profile rotation exhausted for ${provider}/${modelId}; ` +
+                  `candidates=${profileCandidates.length} index=${profileIndex} ` +
+                  `locked=${lockedProfileId ? "true" : "false"}`,
+              );
               promptFailoverDecision = resolveRunFailoverDecision({
                 stage: "prompt",
                 aborted,
