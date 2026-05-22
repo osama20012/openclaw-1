@@ -978,6 +978,7 @@ describe("startGatewayPostAttachRuntime", () => {
       const hook = hoisted.setAuthProfileFailureHook.mock.calls[0]?.[0] as (() => void) | undefined;
       hook?.();
       expect(hoisted.clearCurrentProviderAuthState).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_000);
       expect(hoisted.warmCurrentProviderAuthState).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
@@ -1012,13 +1013,47 @@ describe("startGatewayPostAttachRuntime", () => {
     }
   });
 
-  it("uses the current provider auth config when the delayed prewarm fires", async () => {
+  it("cancels debounced provider auth failure rewarms when the sidecar stops", async () => {
+    vi.useFakeTimers();
+    const log = { info: vi.fn(), warn: vi.fn() };
+
+    try {
+      const sidecar = testing.scheduleProviderAuthStatePrewarm({
+        getConfig: () => ({ marker: "current" }) as never,
+        log,
+        delayMs: 10_000,
+      });
+      await vi.dynamicImportSettled();
+      await vi.waitFor(() => {
+        expect(hoisted.setAuthProfileFailureHook).toHaveBeenCalledTimes(1);
+      });
+
+      const hook = hoisted.setAuthProfileFailureHook.mock.calls[0]?.[0] as (() => void) | undefined;
+      hook?.();
+      expect(hoisted.clearCurrentProviderAuthState).toHaveBeenCalledTimes(1);
+
+      sidecar.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(hoisted.warmCurrentProviderAuthState).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces auth failure rewarms while a provider auth warm is in flight", async () => {
     vi.useFakeTimers();
     const startupCfg = { marker: "startup" } as never;
-    const reloadedCfg = { marker: "reloaded" } as never;
     const afterFailureCfg = { marker: "after-failure" } as never;
     let currentCfg = startupCfg;
     const log = { info: vi.fn(), warn: vi.fn() };
+    let resolveFirstWarm: (() => void) | undefined;
+    hoisted.warmCurrentProviderAuthState.mockImplementationOnce(
+      async () =>
+        await new Promise<void>((resolve) => {
+          resolveFirstWarm = resolve;
+        }),
+    );
+    hoisted.warmCurrentProviderAuthState.mockResolvedValue(undefined);
 
     try {
       testing.scheduleProviderAuthStatePrewarm({
@@ -1026,7 +1061,6 @@ describe("startGatewayPostAttachRuntime", () => {
         log,
         delayMs: 0,
       });
-      currentCfg = reloadedCfg;
       await vi.dynamicImportSettled();
       await vi.waitFor(() => {
         expect(hoisted.setAuthProfileFailureHook).toHaveBeenCalledTimes(1);
@@ -1041,14 +1075,57 @@ describe("startGatewayPostAttachRuntime", () => {
         throw new Error("Expected provider auth failure hook to be registered");
       }
 
+      currentCfg = afterFailureCfg;
+      hook();
+      hook();
+      hook();
+      expect(hoisted.clearCurrentProviderAuthState).toHaveBeenCalledTimes(3);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(hoisted.warmCurrentProviderAuthState).toHaveBeenCalledTimes(1);
+
+      resolveFirstWarm?.();
+      await vi.waitFor(() => {
+        expect(hoisted.warmCurrentProviderAuthState).toHaveBeenCalledTimes(2);
+      });
+      expect(hoisted.warmCurrentProviderAuthState.mock.calls[0]?.[0]).toBe(startupCfg);
+      expect(hoisted.warmCurrentProviderAuthState.mock.calls[1]?.[0]).toBe(afterFailureCfg);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the current provider auth config when a debounced auth failure rewarm fires", async () => {
+    vi.useFakeTimers();
+    const startupCfg = { marker: "startup" } as never;
+    const afterFailureCfg = { marker: "after-failure" } as never;
+    let currentCfg = startupCfg;
+    const log = { info: vi.fn(), warn: vi.fn() };
+
+    try {
+      testing.scheduleProviderAuthStatePrewarm({
+        getConfig: () => currentCfg,
+        log,
+        delayMs: 10_000,
+      });
+      await vi.dynamicImportSettled();
+      await vi.waitFor(() => {
+        expect(hoisted.setAuthProfileFailureHook).toHaveBeenCalledTimes(1);
+      });
+
+      const hook = hoisted.setAuthProfileFailureHook.mock.calls[0]?.[0] as (() => void) | undefined;
+      if (!hook) {
+        throw new Error("Expected provider auth failure hook to be registered");
+      }
+
       hook();
       currentCfg = afterFailureCfg;
       hook();
-      expect(hoisted.clearCurrentProviderAuthState).toHaveBeenCalledTimes(2);
-      expect(hoisted.warmCurrentProviderAuthState).toHaveBeenCalledTimes(3);
-      expect(hoisted.warmCurrentProviderAuthState.mock.calls[0]?.[0]).toBe(reloadedCfg);
-      expect(hoisted.warmCurrentProviderAuthState.mock.calls[1]?.[0]).toBe(reloadedCfg);
-      expect(hoisted.warmCurrentProviderAuthState.mock.calls[2]?.[0]).toBe(afterFailureCfg);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => {
+        expect(hoisted.warmCurrentProviderAuthState).toHaveBeenCalledTimes(1);
+      });
+      expect(hoisted.warmCurrentProviderAuthState.mock.calls[0]?.[0]).toBe(afterFailureCfg);
     } finally {
       vi.useRealTimers();
     }

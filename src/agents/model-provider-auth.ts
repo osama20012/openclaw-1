@@ -190,6 +190,9 @@ export async function warmCurrentProviderAuthState(
   currentProviderAuthStateGeneration += 1;
   const ownGeneration = currentProviderAuthStateGeneration;
   const catalog = await loadModelCatalog({ config: cfg });
+  if (options.isCancelled?.()) {
+    return;
+  }
   const providers = new Set<string>();
   for (const entry of catalog) {
     providers.add(normalizeProviderId(entry.provider));
@@ -201,6 +204,9 @@ export async function warmCurrentProviderAuthState(
   // any agentId. The catalog above is shared across agents; the per-agent
   // work is the auth-discovery sweep against that agent's store.
   for (const agentId of listAgentIds(cfg)) {
+    if (options.isCancelled?.() || ownGeneration !== currentProviderAuthStateGeneration) {
+      return;
+    }
     const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
     const agentDir = resolveAgentDir(cfg, agentId);
     // One AuthProfileStore scoped to every candidate provider; without this
@@ -214,6 +220,9 @@ export async function warmCurrentProviderAuthState(
     });
     const state = new Map<string, boolean>();
     for (const provider of providers) {
+      if (options.isCancelled?.() || ownGeneration !== currentProviderAuthStateGeneration) {
+        return;
+      }
       const value = await hasAuthForModelProvider({
         provider,
         cfg,
@@ -221,6 +230,9 @@ export async function warmCurrentProviderAuthState(
         agentId,
         store,
       });
+      if (options.isCancelled?.() || ownGeneration !== currentProviderAuthStateGeneration) {
+        return;
+      }
       state.set(provider, value);
     }
     states.set(agentId, {

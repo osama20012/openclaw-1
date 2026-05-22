@@ -28,6 +28,7 @@ const ACP_BACKEND_READY_POLL_MS = 50;
 const PRIMARY_MODEL_PREWARM_TIMEOUT_MS = 5_000;
 const STARTUP_PROVIDER_DISCOVERY_TIMEOUT_MS = 5_000;
 const PROVIDER_AUTH_PREWARM_START_DELAY_MS = 1_000;
+const PROVIDER_AUTH_FAILURE_REWARM_DEBOUNCE_MS = 1_000;
 const SKIP_STARTUP_MODEL_PREWARM_ENV = "OPENCLAW_SKIP_STARTUP_MODEL_PREWARM";
 const QMD_STARTUP_IDLE_DELAY_MS = 120_000;
 const RESTART_SENTINEL_FILENAME = "restart-sentinel.json";
@@ -156,28 +157,77 @@ function scheduleProviderAuthStatePrewarm(params: {
 }): GatewayPostReadySidecarHandle {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let failureRewarmTimer: ReturnType<typeof setTimeout> | undefined;
+  let warmInFlight: Promise<void> | undefined;
+  let queuedRewarmReason: string | undefined;
   const isStopped = () => stopped;
   const delayMs = params.delayMs ?? PROVIDER_AUTH_PREWARM_START_DELAY_MS;
   void (async () => {
     const { clearCurrentProviderAuthState, warmCurrentProviderAuthState } =
       await import("../agents/model-provider-auth.js");
     const { setAuthProfileFailureHook } = await import("../agents/auth-profiles.js");
-    const scheduleAuthMapRewarm = (reason: string) => {
+    const runAuthMapWarm = (kind: "prewarm" | "rewarm", reason?: string) => {
       if (isStopped()) {
+        return;
+      }
+      if (warmInFlight) {
+        if (kind === "rewarm") {
+          queuedRewarmReason = reason ?? "auth-profile-failure";
+        }
         return;
       }
       const cfg = params.getConfig();
       const startMs = Date.now();
-      void warmCurrentProviderAuthState(cfg, { isCancelled: isStopped })
+      warmInFlight = warmCurrentProviderAuthState(cfg, { isCancelled: isStopped })
         .then(() => {
           if (isStopped()) {
             return;
           }
-          params.log.info(`provider auth state re-warmed (${reason}) in ${Date.now() - startMs}ms`);
+          if (kind === "prewarm") {
+            params.log.info(`provider auth state pre-warmed in ${Date.now() - startMs}ms`);
+          } else {
+            params.log.info(
+              `provider auth state re-warmed (${reason ?? "auth-profile-failure"}) in ${Date.now() - startMs}ms`,
+            );
+          }
         })
         .catch((err) => {
-          params.log.warn(`provider auth state rewarm failed: ${String(err)}`);
+          params.log.warn(
+            kind === "prewarm"
+              ? `provider auth state pre-warm failed: ${String(err)}`
+              : `provider auth state rewarm failed: ${String(err)}`,
+          );
+        })
+        .finally(() => {
+          warmInFlight = undefined;
+          if (isStopped() || !queuedRewarmReason) {
+            return;
+          }
+          const nextReason = queuedRewarmReason;
+          queuedRewarmReason = undefined;
+          runAuthMapWarm("rewarm", nextReason);
         });
+    };
+    const scheduleAuthMapRewarm = (reason: string) => {
+      if (isStopped()) {
+        return;
+      }
+      if (warmInFlight) {
+        queuedRewarmReason = reason;
+        if (failureRewarmTimer) {
+          clearTimeout(failureRewarmTimer);
+          failureRewarmTimer = undefined;
+        }
+        return;
+      }
+      if (failureRewarmTimer) {
+        clearTimeout(failureRewarmTimer);
+      }
+      failureRewarmTimer = setTimeout(() => {
+        failureRewarmTimer = undefined;
+        runAuthMapWarm("rewarm", reason);
+      }, PROVIDER_AUTH_FAILURE_REWARM_DEBOUNCE_MS);
+      failureRewarmTimer.unref?.();
     };
     if (isStopped()) {
       return;
@@ -191,20 +241,8 @@ function scheduleProviderAuthStatePrewarm(params: {
     });
     timer = setTimeout(
       () => {
-        void (async () => {
-          if (isStopped()) {
-            return;
-          }
-          const cfg = params.getConfig();
-          const startMs = Date.now();
-          await warmCurrentProviderAuthState(cfg, { isCancelled: isStopped });
-          if (isStopped()) {
-            return;
-          }
-          params.log.info(`provider auth state pre-warmed in ${Date.now() - startMs}ms`);
-        })().catch((err) => {
-          params.log.warn(`provider auth state pre-warm failed: ${String(err)}`);
-        });
+        timer = undefined;
+        runAuthMapWarm("prewarm");
       },
       Math.max(0, delayMs),
     );
@@ -218,6 +256,10 @@ function scheduleProviderAuthStatePrewarm(params: {
       if (timer) {
         clearTimeout(timer);
         timer = undefined;
+      }
+      if (failureRewarmTimer) {
+        clearTimeout(failureRewarmTimer);
+        failureRewarmTimer = undefined;
       }
     },
   };

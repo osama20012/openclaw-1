@@ -192,17 +192,17 @@ describe("prepared provider auth state", () => {
     await secondWarm;
     resolveFirstCatalog?.([{ id: "gpt", name: "gpt", provider: "openai" }]);
     await firstWarm;
-    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(2);
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
 
     modelAuthMocks.hasRuntimeAvailableProviderAuth.mockReturnValue(true);
     await expect(hasAuthForModelProvider({ provider: "openai", cfg: secondCfg })).resolves.toBe(
       false,
     );
-    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(2);
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
     await expect(hasAuthForModelProvider({ provider: "openai", cfg: firstCfg })).resolves.toBe(
       true,
     );
-    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(3);
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(2);
   });
 
   it("does not publish a warm that is cancelled before completion", async () => {
@@ -224,6 +224,27 @@ describe("prepared provider auth state", () => {
 
     modelAuthMocks.hasRuntimeAvailableProviderAuth.mockReturnValue(false);
     await expect(hasAuthForModelProvider({ provider: "openai", cfg })).resolves.toBe(false);
-    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(2);
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops warming providers when cancellation is requested mid-sweep", async () => {
+    const cfg = {} as OpenClawConfig;
+    let cancelled = false;
+    modelCatalogMocks.loadModelCatalog.mockResolvedValue([
+      { id: "gpt", name: "gpt", provider: "openai" },
+      { id: "claude", name: "claude", provider: "anthropic" },
+    ]);
+    modelAuthMocks.hasRuntimeAvailableProviderAuth.mockImplementation(() => {
+      cancelled = true;
+      return true;
+    });
+
+    await warmCurrentProviderAuthState(cfg, { isCancelled: () => cancelled });
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
+
+    modelAuthMocks.hasRuntimeAvailableProviderAuth.mockReset();
+    modelAuthMocks.hasRuntimeAvailableProviderAuth.mockReturnValue(false);
+    await expect(hasAuthForModelProvider({ provider: "openai", cfg })).resolves.toBe(false);
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
   });
 });
