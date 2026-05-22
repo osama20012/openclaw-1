@@ -53,6 +53,9 @@ const hoisted = vi.hoisted(() => {
   const clearCurrentProviderAuthState = vi.fn();
   const warmCurrentProviderAuthState = vi.fn(async (_cfg?: unknown, _options?: unknown) => {});
   const setAuthProfileFailureHook = vi.fn();
+  const getActiveEmbeddedRunCount = vi.fn(() => 0);
+  const getTotalPendingReplies = vi.fn(() => 0);
+  const getTotalQueueSize = vi.fn(() => 0);
   return {
     startPluginServices,
     startGmailWatcherWithLogs,
@@ -85,6 +88,9 @@ const hoisted = vi.hoisted(() => {
     clearCurrentProviderAuthState,
     warmCurrentProviderAuthState,
     setAuthProfileFailureHook,
+    getActiveEmbeddedRunCount,
+    getTotalPendingReplies,
+    getTotalQueueSize,
   };
 });
 
@@ -219,8 +225,29 @@ vi.mock("./server-tailscale.js", () => ({
   startGatewayTailscaleExposure: hoisted.startGatewayTailscaleExposure,
 }));
 
+vi.mock("../agents/pi-embedded-runner/run-state.js", () => ({
+  getActiveEmbeddedRunCount: hoisted.getActiveEmbeddedRunCount,
+}));
+
+vi.mock("../auto-reply/reply/dispatcher-registry.js", () => ({
+  getTotalPendingReplies: hoisted.getTotalPendingReplies,
+}));
+
+vi.mock("../process/command-queue.js", async () => {
+  const actual = await vi.importActual<typeof import("../process/command-queue.js")>(
+    "../process/command-queue.js",
+  );
+  return {
+    ...actual,
+    getTotalQueueSize: hoisted.getTotalQueueSize,
+  };
+});
+
 const { startGatewayPostAttachRuntime, startGatewaySidecars, testing } =
   await import("./server-startup-post-attach.js");
+const { testing: providerAuthWarmSchedulerTesting } = await import(
+  "./provider-auth-state-warm-scheduler.js"
+);
 const { STARTUP_UNAVAILABLE_GATEWAY_METHODS } = await import("./methods/core-descriptors.js");
 
 type PostAttachParams = Parameters<typeof startGatewayPostAttachRuntime>[0];
@@ -349,6 +376,13 @@ describe("startGatewayPostAttachRuntime", () => {
     hoisted.warmCurrentProviderAuthState.mockReset();
     hoisted.warmCurrentProviderAuthState.mockResolvedValue(undefined);
     hoisted.setAuthProfileFailureHook.mockClear();
+    hoisted.getActiveEmbeddedRunCount.mockReset();
+    hoisted.getActiveEmbeddedRunCount.mockReturnValue(0);
+    hoisted.getTotalPendingReplies.mockReset();
+    hoisted.getTotalPendingReplies.mockReturnValue(0);
+    hoisted.getTotalQueueSize.mockReset();
+    hoisted.getTotalQueueSize.mockReturnValue(0);
+    providerAuthWarmSchedulerTesting.resetProviderAuthStateWarmSchedulerForTest();
   });
 
   afterEach(() => {
@@ -1008,6 +1042,35 @@ describe("startGatewayPostAttachRuntime", () => {
       hook?.();
       expect(hoisted.clearCurrentProviderAuthState).not.toHaveBeenCalled();
       expect(hoisted.warmCurrentProviderAuthState).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("defers provider auth prewarm while embedded work is active", async () => {
+    vi.useFakeTimers();
+    const log = { info: vi.fn(), warn: vi.fn() };
+
+    try {
+      hoisted.getActiveEmbeddedRunCount.mockReturnValue(1);
+      testing.scheduleProviderAuthStatePrewarm({
+        getConfig: () => ({ marker: "current" }) as never,
+        log,
+        delayMs: 0,
+      });
+      await vi.dynamicImportSettled();
+      await vi.waitFor(() => {
+        expect(hoisted.setAuthProfileFailureHook).toHaveBeenCalledTimes(1);
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hoisted.warmCurrentProviderAuthState).not.toHaveBeenCalled();
+
+      hoisted.getActiveEmbeddedRunCount.mockReturnValue(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => {
+        expect(hoisted.warmCurrentProviderAuthState).toHaveBeenCalledTimes(1);
+      });
     } finally {
       vi.useRealTimers();
     }

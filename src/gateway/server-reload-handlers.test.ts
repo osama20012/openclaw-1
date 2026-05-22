@@ -7,6 +7,7 @@ import {
   createGatewayReloadHandlers,
   startManagedGatewayConfigReloader,
 } from "./server-reload-handlers.js";
+import { testing as providerAuthWarmSchedulerTesting } from "./provider-auth-state-warm-scheduler.js";
 
 type GmailWatcherRestartParams = {
   cfg: OpenClawConfig;
@@ -43,7 +44,9 @@ const hoisted = vi.hoisted(() => ({
   reloadEvents: [] as string[],
   resetModelCatalogCache: vi.fn(() => {}),
   clearCurrentProviderAuthState: vi.fn(() => {}),
-  warmCurrentProviderAuthState: vi.fn(async (_cfg: OpenClawConfig) => {}),
+  warmCurrentProviderAuthState: vi.fn(async (_cfg: OpenClawConfig, _options?: unknown) => {}),
+  pendingReplies: { value: 0 },
+  queueSize: { value: 0 },
 }));
 
 vi.mock("../hooks/gmail-watcher.js", () => ({
@@ -91,6 +94,20 @@ vi.mock("../agents/pi-embedded-runner/run-state.js", () => ({
   listActiveEmbeddedRunSessionKeys: () => hoisted.activeEmbeddedRunSessionKeys,
 }));
 
+vi.mock("../auto-reply/reply/dispatcher-registry.js", () => ({
+  getTotalPendingReplies: () => hoisted.pendingReplies.value,
+}));
+
+vi.mock("../process/command-queue.js", async () => {
+  const actual = await vi.importActual<typeof import("../process/command-queue.js")>(
+    "../process/command-queue.js",
+  );
+  return {
+    ...actual,
+    getTotalQueueSize: () => hoisted.queueSize.value,
+  };
+});
+
 vi.mock("../agents/main-session-restart-recovery.js", () => ({
   markRestartAbortedMainSessions: hoisted.markRestartAbortedMainSessions,
 }));
@@ -111,9 +128,9 @@ vi.mock("../agents/model-provider-auth.js", () => ({
     hoisted.reloadEvents.push("clear-provider-auth");
     hoisted.clearCurrentProviderAuthState();
   },
-  warmCurrentProviderAuthState: async (cfg: OpenClawConfig) => {
+  warmCurrentProviderAuthState: async (cfg: OpenClawConfig, options?: unknown) => {
     hoisted.reloadEvents.push("warm-provider-auth");
-    await hoisted.warmCurrentProviderAuthState(cfg);
+    await hoisted.warmCurrentProviderAuthState(cfg, options);
   },
 }));
 
@@ -157,6 +174,8 @@ afterEach(() => {
   hoisted.activeTaskCount.value = 0;
   hoisted.activeTaskBlockers.length = 0;
   hoisted.activeEmbeddedRunCount.value = 0;
+  hoisted.pendingReplies.value = 0;
+  hoisted.queueSize.value = 0;
   hoisted.activeEmbeddedRunSessionIds.length = 0;
   hoisted.activeEmbeddedRunSessionKeys.length = 0;
   hoisted.markRestartAbortedMainSessions.mockClear();
@@ -165,6 +184,7 @@ afterEach(() => {
   hoisted.resetModelCatalogCache.mockClear();
   hoisted.clearCurrentProviderAuthState.mockClear();
   hoisted.warmCurrentProviderAuthState.mockClear();
+  providerAuthWarmSchedulerTesting.resetProviderAuthStateWarmSchedulerForTest();
 });
 
 describe("gateway hot reload model state", () => {
@@ -231,7 +251,10 @@ describe("gateway hot reload model state", () => {
       "clear-provider-auth",
       "warm-provider-auth",
     ]);
-    expect(hoisted.warmCurrentProviderAuthState).toHaveBeenCalledWith(nextConfig);
+    expect(hoisted.warmCurrentProviderAuthState).toHaveBeenCalledWith(
+      nextConfig,
+      expect.objectContaining({ maxDurationMs: 5_000 }),
+    );
   });
 });
 

@@ -1,8 +1,5 @@
 import { resetModelCatalogCache } from "../agents/model-catalog.js";
-import {
-  clearCurrentProviderAuthState,
-  warmCurrentProviderAuthState,
-} from "../agents/model-provider-auth.js";
+import { clearCurrentProviderAuthState } from "../agents/model-provider-auth.js";
 import { disposeAllSessionMcpRuntimes } from "../agents/pi-bundle-mcp-tools.js";
 import {
   getActiveEmbeddedRunCount,
@@ -55,6 +52,7 @@ import {
 import type { ActivateRuntimeSecrets } from "./server-startup-config.js";
 import { resolveHookClientIpConfig } from "./server/hook-client-ip-config.js";
 import type { HookClientIpConfig } from "./server/hooks-request-handler.js";
+import { requestProviderAuthStateWarm } from "./provider-auth-state-warm-scheduler.js";
 
 type GatewayHotReloadState = {
   hooksConfig: ReturnType<typeof resolveHooksConfig>;
@@ -500,8 +498,10 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
 
     applyGatewayLaneConcurrency(nextConfig);
 
-    void warmCurrentProviderAuthState(nextConfig).catch((err) => {
-      params.logReload.warn(`provider auth state rewarm failed: ${String(err)}`);
+    requestProviderAuthStateWarm({
+      cfg: nextConfig,
+      log: params.logReload,
+      reason: "reload",
     });
 
     if (plan.hotReasons.length > 0) {

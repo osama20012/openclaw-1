@@ -247,4 +247,72 @@ describe("prepared provider auth state", () => {
     await expect(hasAuthForModelProvider({ provider: "openai", cfg })).resolves.toBe(false);
     expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
   });
+
+  it("publishes only completed provider answers when the warm deadline is reached", async () => {
+    const cfg = {} as OpenClawConfig;
+    let now = 0;
+    const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    modelCatalogMocks.loadModelCatalog.mockResolvedValue([
+      { id: "gpt", name: "gpt", provider: "openai" },
+      { id: "claude", name: "claude", provider: "anthropic" },
+    ]);
+    modelAuthMocks.hasRuntimeAvailableProviderAuth.mockImplementation(({ provider }) => {
+      now = 10_000;
+      return provider === "openai";
+    });
+
+    try {
+      await warmCurrentProviderAuthState(cfg, { maxDurationMs: 5 });
+    } finally {
+      dateSpy.mockRestore();
+    }
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
+
+    modelAuthMocks.hasRuntimeAvailableProviderAuth.mockReturnValue(false);
+    await expect(hasAuthForModelProvider({ provider: "openai", cfg })).resolves.toBe(true);
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
+
+    await expect(hasAuthForModelProvider({ provider: "anthropic", cfg })).resolves.toBe(false);
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses explicit providerIds without loading the full catalog", async () => {
+    const cfg = {} as OpenClawConfig;
+    modelCatalogMocks.loadModelCatalog.mockRejectedValue(new Error("catalog should not load"));
+    modelAuthMocks.hasRuntimeAvailableProviderAuth.mockReturnValue(true);
+
+    await warmCurrentProviderAuthState(cfg, { providerIds: ["openai"] });
+
+    expect(modelCatalogMocks.loadModelCatalog).not.toHaveBeenCalled();
+    expect(authProfilesMocks.externalCliDiscoveryForProviders).toHaveBeenCalledWith({
+      cfg,
+      providers: ["openai"],
+    });
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
+    await expect(hasAuthForModelProvider({ provider: "openai", cfg })).resolves.toBe(true);
+    expect(modelAuthMocks.hasRuntimeAvailableProviderAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it("derives provider scope from config before falling back to the catalog", async () => {
+    const cfg = {
+      agents: {
+        defaults: { model: { primary: "openai/gpt-5.5", fallbacks: ["anthropic/claude"] } },
+      },
+      auth: {
+        profiles: {
+          codex: { provider: "openai-codex", mode: "oauth" },
+        },
+      },
+    } as OpenClawConfig;
+    modelCatalogMocks.loadModelCatalog.mockRejectedValue(new Error("catalog should not load"));
+    modelAuthMocks.hasRuntimeAvailableProviderAuth.mockReturnValue(false);
+
+    await warmCurrentProviderAuthState(cfg);
+
+    expect(modelCatalogMocks.loadModelCatalog).not.toHaveBeenCalled();
+    expect(authProfilesMocks.externalCliDiscoveryForProviders).toHaveBeenCalledWith({
+      cfg,
+      providers: ["openai-codex", "openai", "anthropic"],
+    });
+  });
 });

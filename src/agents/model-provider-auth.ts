@@ -1,4 +1,8 @@
 import { hashRuntimeConfigValue } from "../config/runtime-snapshot.js";
+import {
+  resolveAgentModelFallbackValues,
+  resolveAgentModelPrimaryValue,
+} from "../config/model-input.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   listAgentIds,
@@ -39,6 +43,12 @@ const configFingerprintCache = new WeakMap<OpenClawConfig, string>();
 // Generation counter guards against an in-flight warm publishing stale
 // state after a subsequent warm or clear has invalidated it.
 let currentProviderAuthStateGeneration = 0;
+
+type WarmCurrentProviderAuthStateOptions = {
+  isCancelled?: () => boolean;
+  maxDurationMs?: number;
+  providerIds?: Iterable<string>;
+};
 
 export function clearCurrentProviderAuthState(): void {
   currentProviderAuthStates = null;
@@ -181,34 +191,165 @@ export function createProviderAuthChecker(params: {
   };
 }
 
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function addProviderId(out: Set<string>, value: string | undefined): void {
+  const raw = value?.trim();
+  if (!raw) {
+    return;
+  }
+  const normalized = normalizeProviderId(raw);
+  if (normalized) {
+    out.add(normalized);
+  }
+}
+
+function addProviderFromModelRef(out: Set<string>, value: string | undefined): void {
+  const raw = value?.trim();
+  if (!raw) {
+    return;
+  }
+  const slash = raw.indexOf("/");
+  if (slash <= 0) {
+    return;
+  }
+  addProviderId(out, raw.slice(0, slash));
+}
+
+function addProviderFromModelConfig(
+  out: Set<string>,
+  model: Parameters<typeof resolveAgentModelPrimaryValue>[0],
+): void {
+  addProviderFromModelRef(out, resolveAgentModelPrimaryValue(model));
+  for (const fallback of resolveAgentModelFallbackValues(model)) {
+    addProviderFromModelRef(out, fallback);
+  }
+}
+
+function addProvidersFromModelMap(out: Set<string>, models: unknown): void {
+  if (!models || typeof models !== "object" || Array.isArray(models)) {
+    return;
+  }
+  for (const key of Object.keys(models)) {
+    addProviderFromModelRef(out, key);
+  }
+}
+
+function resolveProviderIdsFromConfig(cfg: OpenClawConfig): string[] {
+  const out = new Set<string>();
+  for (const id of Object.keys(cfg.models?.providers ?? {})) {
+    addProviderId(out, id);
+  }
+  for (const profile of Object.values(cfg.auth?.profiles ?? {})) {
+    addProviderId(out, profile?.provider);
+  }
+  for (const provider of Object.keys(cfg.auth?.order ?? {})) {
+    addProviderId(out, provider);
+  }
+
+  const defaults = cfg.agents?.defaults;
+  addProviderFromModelConfig(out, defaults?.model);
+  addProviderFromModelConfig(out, defaults?.imageModel);
+  addProviderFromModelConfig(out, defaults?.imageGenerationModel);
+  addProviderFromModelConfig(out, defaults?.videoGenerationModel);
+  addProviderFromModelConfig(out, defaults?.musicGenerationModel);
+  addProviderFromModelConfig(out, defaults?.pdfModel);
+  addProvidersFromModelMap(out, defaults?.models);
+
+  const agents = Array.isArray(cfg.agents?.list) ? cfg.agents.list : [];
+  for (const agent of agents) {
+    addProviderFromModelConfig(out, agent?.model);
+    addProviderFromModelConfig(out, agent?.subagents?.model);
+    addProvidersFromModelMap(out, agent?.models);
+  }
+  return [...out];
+}
+
+function normalizeProviderScope(values: Iterable<string> | undefined): string[] {
+  if (!values) {
+    return [];
+  }
+  const out = new Set<string>();
+  for (const value of values) {
+    addProviderId(out, value);
+  }
+  return [...out];
+}
+
+async function resolveProviderWarmScope(
+  cfg: OpenClawConfig,
+  options: WarmCurrentProviderAuthStateOptions,
+  isStaleOrCancelled: () => boolean,
+  isDeadlineExceeded: () => boolean,
+): Promise<string[]> {
+  const explicitScope = normalizeProviderScope(options.providerIds);
+  if (explicitScope.length > 0) {
+    return explicitScope;
+  }
+  const configScope = resolveProviderIdsFromConfig(cfg);
+  if (configScope.length > 0) {
+    return configScope;
+  }
+  if (isStaleOrCancelled() || isDeadlineExceeded()) {
+    return [];
+  }
+  const catalog = await loadModelCatalog({ config: cfg });
+  if (isStaleOrCancelled() || isDeadlineExceeded()) {
+    return [];
+  }
+  const providers = new Set<string>();
+  for (const entry of catalog) {
+    addProviderId(providers, entry.provider);
+  }
+  return [...providers];
+}
+
 export async function warmCurrentProviderAuthState(
   cfg: OpenClawConfig,
-  options: { isCancelled?: () => boolean } = {},
+  options: WarmCurrentProviderAuthStateOptions = {},
 ): Promise<void> {
   // Claim a fresh generation; any concurrent warm or clear bumps this and
   // turns our published state stale.
   currentProviderAuthStateGeneration += 1;
   const ownGeneration = currentProviderAuthStateGeneration;
-  const catalog = await loadModelCatalog({ config: cfg });
-  if (options.isCancelled?.()) {
+  const deadlineAt =
+    typeof options.maxDurationMs === "number" &&
+    Number.isFinite(options.maxDurationMs) &&
+    options.maxDurationMs >= 0
+      ? Date.now() + Math.floor(options.maxDurationMs)
+      : undefined;
+  const isStaleOrCancelled = () =>
+    options.isCancelled?.() === true || ownGeneration !== currentProviderAuthStateGeneration;
+  const isDeadlineExceeded = () => deadlineAt !== undefined && Date.now() >= deadlineAt;
+  if (isStaleOrCancelled()) {
     return;
   }
-  const providers = new Set<string>();
-  for (const entry of catalog) {
-    providers.add(normalizeProviderId(entry.provider));
+  const providerList = await resolveProviderWarmScope(
+    cfg,
+    options,
+    isStaleOrCancelled,
+    isDeadlineExceeded,
+  );
+  if (isStaleOrCancelled() || providerList.length === 0) {
+    return;
   }
-  const providerList = [...providers];
   const configFingerprint = resolveProviderAuthConfigFingerprint(cfg) ?? "";
   const states = new Map<string, PreparedProviderAuthState>();
   // Warm one entry per configured agent so callers hit the prepared map for
   // any agentId. The catalog above is shared across agents; the per-agent
   // work is the auth-discovery sweep against that agent's store.
   for (const agentId of listAgentIds(cfg)) {
-    if (options.isCancelled?.() || ownGeneration !== currentProviderAuthStateGeneration) {
+    if (isStaleOrCancelled() || isDeadlineExceeded()) {
       return;
     }
     const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
     const agentDir = resolveAgentDir(cfg, agentId);
+    await yieldToEventLoop();
+    if (isStaleOrCancelled() || isDeadlineExceeded()) {
+      return;
+    }
     // One AuthProfileStore scoped to every candidate provider; without this
     // the per-provider externalCli discovery rebuilds the store ~N times.
     const store = ensureAuthProfileStore(agentDir, {
@@ -219,9 +360,16 @@ export async function warmCurrentProviderAuthState(
       }),
     });
     const state = new Map<string, boolean>();
-    for (const provider of providers) {
-      if (options.isCancelled?.() || ownGeneration !== currentProviderAuthStateGeneration) {
+    for (const provider of providerList) {
+      if (isStaleOrCancelled()) {
         return;
+      }
+      if (isDeadlineExceeded()) {
+        break;
+      }
+      await yieldToEventLoop();
+      if (isStaleOrCancelled() || isDeadlineExceeded()) {
+        break;
       }
       const value = await hasAuthForModelProvider({
         provider,
@@ -230,18 +378,23 @@ export async function warmCurrentProviderAuthState(
         agentId,
         store,
       });
-      if (options.isCancelled?.() || ownGeneration !== currentProviderAuthStateGeneration) {
+      if (isStaleOrCancelled()) {
         return;
       }
       state.set(provider, value);
     }
-    states.set(agentId, {
-      agentId,
-      configFingerprint,
-      providers: state,
-    });
+    if (state.size > 0) {
+      states.set(agentId, {
+        agentId,
+        configFingerprint,
+        providers: state,
+      });
+    }
+    if (isDeadlineExceeded()) {
+      break;
+    }
   }
-  if (options.isCancelled?.() || ownGeneration !== currentProviderAuthStateGeneration) {
+  if (isStaleOrCancelled()) {
     // A newer warm or clear ran while we were building; skip publication so
     // the newer answer wins.
     return;

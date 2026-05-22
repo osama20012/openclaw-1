@@ -24,7 +24,10 @@ const mocks = vi.hoisted(() => ({
   ),
   refreshActiveSecretsRuntimeSnapshot: vi.fn(async () => false),
   clearCurrentProviderAuthState: vi.fn(),
-  warmCurrentProviderAuthState: vi.fn(async (_cfg: unknown) => {}),
+  warmCurrentProviderAuthState: vi.fn(async (_cfg: unknown, _options?: unknown) => {}),
+  getActiveEmbeddedRunCount: vi.fn(() => 0),
+  getTotalPendingReplies: vi.fn(() => 0),
+  getTotalQueueSize: vi.fn(() => 0),
   buildAuthHealthSummary: vi.fn(
     (): AuthHealthSummary => ({ now: 0, warnAfterMs: 0, profiles: [], providers: [] }),
   ),
@@ -77,6 +80,24 @@ vi.mock("../../agents/model-provider-auth.js", () => ({
   warmCurrentProviderAuthState: mocks.warmCurrentProviderAuthState,
 }));
 
+vi.mock("../../agents/pi-embedded-runner/run-state.js", () => ({
+  getActiveEmbeddedRunCount: mocks.getActiveEmbeddedRunCount,
+}));
+
+vi.mock("../../auto-reply/reply/dispatcher-registry.js", () => ({
+  getTotalPendingReplies: mocks.getTotalPendingReplies,
+}));
+
+vi.mock("../../process/command-queue.js", async () => {
+  const actual = await vi.importActual<typeof import("../../process/command-queue.js")>(
+    "../../process/command-queue.js",
+  );
+  return {
+    ...actual,
+    getTotalQueueSize: mocks.getTotalQueueSize,
+  };
+});
+
 import {
   aggregateOAuthStatus,
   invalidateModelAuthStatusCache,
@@ -84,6 +105,7 @@ import {
   type ModelAuthLogoutResult,
   type ModelAuthStatusResult,
 } from "./models-auth-status.js";
+import { testing as providerAuthWarmSchedulerTesting } from "../provider-auth-state-warm-scheduler.js";
 
 function createOptions(
   params: Record<string, unknown> = {},
@@ -196,6 +218,7 @@ function createOpenAiCodexOauthHealthSummary(): AuthHealthSummary {
 describe("models.authStatus", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    providerAuthWarmSchedulerTesting.resetProviderAuthStateWarmSchedulerForTest();
     invalidateModelAuthStatusCache();
     mocks.getRuntimeConfig.mockReturnValue({});
     mocks.ensureAuthProfileStore.mockReturnValue({ version: 1, profiles: {} });
@@ -593,6 +616,7 @@ describe("models.authStatus", () => {
 describe("models.authLogout", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    providerAuthWarmSchedulerTesting.resetProviderAuthStateWarmSchedulerForTest();
     invalidateModelAuthStatusCache();
     mocks.getRuntimeConfig.mockReturnValue({});
     mocks.ensureAuthProfileStore.mockReturnValue({ version: 1, profiles: {} });
@@ -622,7 +646,10 @@ describe("models.authLogout", () => {
     });
     expect(mocks.refreshActiveSecretsRuntimeSnapshot).toHaveBeenCalledTimes(1);
     expect(mocks.clearCurrentProviderAuthState).toHaveBeenCalled();
-    expect(mocks.warmCurrentProviderAuthState).toHaveBeenCalledWith({});
+    expect(mocks.warmCurrentProviderAuthState).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ maxDurationMs: 5_000 }),
+    );
     const [ok, payload] = firstRespondCall(opts) ?? [];
     expect(ok).toBe(true);
     expect((payload as ModelAuthLogoutResult).removedProfiles).toEqual(["openrouter:default"]);

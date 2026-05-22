@@ -157,78 +157,14 @@ function scheduleProviderAuthStatePrewarm(params: {
 }): GatewayPostReadySidecarHandle {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let failureRewarmTimer: ReturnType<typeof setTimeout> | undefined;
-  let warmInFlight: Promise<void> | undefined;
-  let queuedRewarmReason: string | undefined;
+  let activeWarmHandle: { cancel: () => void } | undefined;
   const isStopped = () => stopped;
   const delayMs = params.delayMs ?? PROVIDER_AUTH_PREWARM_START_DELAY_MS;
   void (async () => {
-    const { clearCurrentProviderAuthState, warmCurrentProviderAuthState } =
-      await import("../agents/model-provider-auth.js");
     const { setAuthProfileFailureHook } = await import("../agents/auth-profiles.js");
-    const runAuthMapWarm = (kind: "prewarm" | "rewarm", reason?: string) => {
-      if (isStopped()) {
-        return;
-      }
-      if (warmInFlight) {
-        if (kind === "rewarm") {
-          queuedRewarmReason = reason ?? "auth-profile-failure";
-        }
-        return;
-      }
-      const cfg = params.getConfig();
-      const startMs = Date.now();
-      warmInFlight = warmCurrentProviderAuthState(cfg, { isCancelled: isStopped })
-        .then(() => {
-          if (isStopped()) {
-            return;
-          }
-          if (kind === "prewarm") {
-            params.log.info(`provider auth state pre-warmed in ${Date.now() - startMs}ms`);
-          } else {
-            params.log.info(
-              `provider auth state re-warmed (${reason ?? "auth-profile-failure"}) in ${Date.now() - startMs}ms`,
-            );
-          }
-        })
-        .catch((err) => {
-          params.log.warn(
-            kind === "prewarm"
-              ? `provider auth state pre-warm failed: ${String(err)}`
-              : `provider auth state rewarm failed: ${String(err)}`,
-          );
-        })
-        .finally(() => {
-          warmInFlight = undefined;
-          if (isStopped() || !queuedRewarmReason) {
-            return;
-          }
-          const nextReason = queuedRewarmReason;
-          queuedRewarmReason = undefined;
-          runAuthMapWarm("rewarm", nextReason);
-        });
-    };
-    const scheduleAuthMapRewarm = (reason: string) => {
-      if (isStopped()) {
-        return;
-      }
-      if (warmInFlight) {
-        queuedRewarmReason = reason;
-        if (failureRewarmTimer) {
-          clearTimeout(failureRewarmTimer);
-          failureRewarmTimer = undefined;
-        }
-        return;
-      }
-      if (failureRewarmTimer) {
-        clearTimeout(failureRewarmTimer);
-      }
-      failureRewarmTimer = setTimeout(() => {
-        failureRewarmTimer = undefined;
-        runAuthMapWarm("rewarm", reason);
-      }, PROVIDER_AUTH_FAILURE_REWARM_DEBOUNCE_MS);
-      failureRewarmTimer.unref?.();
-    };
+    const { clearAndRequestProviderAuthStateWarm, requestProviderAuthStateWarm } = await import(
+      "./provider-auth-state-warm-scheduler.js"
+    );
     if (isStopped()) {
       return;
     }
@@ -236,13 +172,22 @@ function scheduleProviderAuthStatePrewarm(params: {
       if (isStopped()) {
         return;
       }
-      clearCurrentProviderAuthState();
-      scheduleAuthMapRewarm("auth-profile-failure");
+      activeWarmHandle?.cancel();
+      activeWarmHandle = clearAndRequestProviderAuthStateWarm({
+        getConfig: params.getConfig,
+        log: params.log,
+        reason: "auth-profile-failure",
+        delayMs: PROVIDER_AUTH_FAILURE_REWARM_DEBOUNCE_MS,
+      });
     });
     timer = setTimeout(
       () => {
         timer = undefined;
-        runAuthMapWarm("prewarm");
+        activeWarmHandle = requestProviderAuthStateWarm({
+          getConfig: params.getConfig,
+          log: params.log,
+          reason: "startup",
+        });
       },
       Math.max(0, delayMs),
     );
@@ -257,10 +202,8 @@ function scheduleProviderAuthStatePrewarm(params: {
         clearTimeout(timer);
         timer = undefined;
       }
-      if (failureRewarmTimer) {
-        clearTimeout(failureRewarmTimer);
-        failureRewarmTimer = undefined;
-      }
+      activeWarmHandle?.cancel();
+      activeWarmHandle = undefined;
     },
   };
 }
